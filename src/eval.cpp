@@ -244,7 +244,7 @@ Evaluator::Accumulator Evaluator::compute(const Position& pos) {
             const int s = std::countr_zero(b);
             acc.mg[side] += TABLES.mg[p][s];
             acc.eg[side] += TABLES.eg[p][s];
-            acc.phase += PHASE_INC[p % 6];
+            acc.phase += PHASE_INC[type_of(p)];
         }
     }
     return acc;
@@ -261,6 +261,14 @@ int Evaluator::score(const Accumulator& acc, Color side_to_move) {
 void Evaluator::reset(const Position& pos) {
     top_ = 0;
     stack_[0] = compute(pos);
+    if (nnue::active()) {
+        if (nnue_.empty()) nnue_.resize(STACK_SIZE);
+        if (nnue::extra_families() && nnue_extras_.empty()) nnue_extras_.resize(STACK_SIZE);
+        for (std::size_t i = 0; i < nnue_.size(); ++i)
+            nnue_[i].extras = nnue::extra_families() ? &nnue_extras_[i] : nullptr;
+        nnue::refresh(pos, nnue_[0]);
+        cache_.reset();
+    }
 }
 
 void Evaluator::push(const DirtyPieces& dirty) {
@@ -273,22 +281,27 @@ void Evaluator::push(const DirtyPieces& dirty) {
             acc.mg[side] -= TABLES.mg[p][d.from];
             acc.eg[side] -= TABLES.eg[p][d.from];
         } else {
-            acc.phase += PHASE_INC[p % 6];  // piece appears (promotion)
+            acc.phase += PHASE_INC[type_of(p)];  // piece appears (promotion)
         }
         if (d.to >= 0) {
             acc.mg[side] += TABLES.mg[p][d.to];
             acc.eg[side] += TABLES.eg[p][d.to];
         } else {
-            acc.phase -= PHASE_INC[p % 6];  // piece leaves the board
+            acc.phase -= PHASE_INC[type_of(p)];  // piece leaves the board
         }
     }
+    if (nnue::active())
+        nnue::update(nnue_[static_cast<std::size_t>(top_)], nnue_[static_cast<std::size_t>(top_) + 1],
+                     dirty);
     stack_[static_cast<std::size_t>(++top_)] = acc;
 }
 
 int Evaluator::evaluate(const Position& pos) const {
-    // The combining point for evaluation terms: the PeSTO score, the
-    // mop-up term and the initiative term, scaled toward a draw in drawish
-    // endings; a network term will be added here.
+    // With a network loaded, it is the evaluation. Otherwise the combining
+    // point for the hand-written terms: the PeSTO score, the mop-up term and
+    // the initiative term, scaled toward a draw in drawish endings.
+    if (nnue::active())
+        return nnue::evaluate(nnue_[static_cast<std::size_t>(top_)], pos, &cache_);
     const int v = score(stack_[static_cast<std::size_t>(top_)], pos.side_to_move()) +
                   mop_up(pos) + initiative::evaluate(pos);
     const int pct = drawish_pct(pos);
@@ -296,8 +309,21 @@ int Evaluator::evaluate(const Position& pos) const {
 }
 
 int evaluate(const Position& pos) {
+    if (nnue::active()) return nnue::evaluate(pos);
     const int v = Evaluator::score(Evaluator::compute(pos), pos.side_to_move()) + mop_up(pos) +
                   initiative::evaluate(pos);
     const int pct = drawish_pct(pos);
     return pct == 100 ? v : v * pct / 100;
+}
+
+EvalParts eval_parts(const Position& pos) {
+    EvalParts p;
+    p.pesto = Evaluator::score(Evaluator::compute(pos), pos.side_to_move());
+    p.initiative = initiative::evaluate(pos);
+    p.mop_up = mop_up(pos);
+    p.drawish_pct = drawish_pct(pos);
+    const int v = p.pesto + p.mop_up + p.initiative;
+    p.total = p.drawish_pct == 100 ? v : v * p.drawish_pct / 100;
+    if (nnue::active()) p.total = nnue::evaluate(pos);
+    return p;
 }

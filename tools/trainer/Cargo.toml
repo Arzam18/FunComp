@@ -1,0 +1,12 @@
+[package]
+name = "funcomp-trainer"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Trains FunComp's networks with bullet (MIT, github.com/jw1912/bullet)"
+
+[dependencies]
+bullet_lib = { git = "https://github.com/jw1912/bullet", package = "bullet_lib", features = ["cuda"] }
+
+[profile.release]
+debug = false

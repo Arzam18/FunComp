@@ -20,6 +20,17 @@ struct SearchLimits {
     int inc[2] = {0, 0};
     int movestogo = 0;
     std::uint64_t nodes = 0; // 0 = no node limit
+    // Soft node limit (data generation): no new iteration starts once the
+    // search has this many nodes; the one in progress finishes, unless
+    // `nodes` cuts it short. 0 = none.
+    std::uint64_t soft_nodes = 0;
+    // The soft node limit scaled as the soft time limit is (tm_* params: a
+    // best move that keeps changing or a falling score earns more, one that
+    // holds or took most of the nodes less; the author, 2026-10-07, datagen).
+    bool soft_scale = false;
+    // "go searchmoves": only these root moves (legal ones; with a tablebase
+    // ranking, those of them it keeps, or its own if none). Empty: all.
+    std::vector<Move> search_moves;
     bool infinite = false;
     // "go ponder": the position after the move we expect the opponent to
     // play. Searched without limits until "ponderhit" (then the clock
@@ -204,6 +215,9 @@ public:
     void resize_hash(std::size_t megabytes) { tt_.resize(megabytes); }
     // Clears the hash table and everything learned (histories, corrections).
     void new_game();
+    // A root move the coming searches leave out (Move{}: none), for
+    // gendata's castlelong; with no other legal move, the result may be it.
+    void avoid_at_root(Move m) { avoid_root_ = m; }
     // Clears what this searcher learned, but not the hash table.
     void clear_history();
 
@@ -251,16 +265,35 @@ public:
     Move ponder_move(Position& pos, Move best);
 
     std::uint64_t nodes() const { return nodes_; }
+    // The last search was cut short by its exact node limit (SearchLimits::
+    // nodes), in the middle of an iteration.
+    bool node_limit_hit() const { return node_limit_ && nodes_ >= node_limit_; }
     // The last search's completed iterations, in order: depth, nodes searched
-    // by the end of it (from the start of the search), score.
+    // by the end of it (from the start of the search), score, the deepest
+    // ply it reached and its best move.
     struct Iteration {
         int depth;
         std::uint64_t nodes;
         int score;
+        int seldepth;
+        Move best{};
     };
     const std::vector<Iteration>& iterations() const { return iterations_; }
     // Tablebase probes that found the position, in the last search.
     std::uint64_t tb_hits() const { return tb_hits_; }
+    // The tables' verdict on the last search's root, when they ranked it:
+    // TB_WIN, -TB_WIN or 0 for the side to move; NO_EVAL otherwise.
+    int root_tablebase_score() const { return root_tb_score_; }
+    // The verdict root_tablebase_score() would give after a search of `pos`
+    // with these limits, without searching (data generation's cheaper
+    // budget for positions the export drops: a won or lost tablebase root
+    // scores as decisive).
+    int tablebase_verdict(const Position& pos, const SearchLimits& limits);
+    // A "go nodes" search at data generation's limits when the frame options
+    // ask for it (params::frame_soft_nodes; frame L2): sets the soft limit,
+    // softscale, and the drop budget for a root in check or a tablebase root
+    // won or lost. Leaves limits alone otherwise.
+    void apply_frame_limits(const Position& pos, SearchLimits& limits);
     // Both counts as last published for other threads to read: at least
     // every 2048 nodes during a search, and exactly at its end.
     std::uint64_t published_nodes() const { return published_nodes_.load(std::memory_order_relaxed); }
@@ -269,6 +302,16 @@ public:
     }
     // Score of the last completed iteration of the last search.
     int last_score() const { return last_score_; }
+    // Data generation. root_eval: the static eval a search of `pos` would
+    // start from at its root (correction history and fifty-move scaling
+    // applied) and the correction in it; NO_EVAL for both in check.
+    // quiescence: a full-window quiescence search of `pos` (`history` as for
+    // search()), on the current hash table and histories; it resets nodes().
+    struct RootEval {
+        int static_eval, correction;
+    };
+    RootEval root_eval(const Position& pos);
+    int quiescence(Position& pos, const std::vector<std::uint64_t>& history);
     // For tests: nodes spent under root move `m` in the last search, over
     // all its iterations, and under all root moves together.
     std::uint64_t root_move_nodes(Move m) const {
@@ -341,25 +384,22 @@ private:
         // if the child fails low. For the prior-countermove bonus.
         int move_index = 0;
         bool provisional = false;
+        // This node's children that failed high in their own move loops, so
+        // far (params::lmr_child_cutoffs).
+        int child_cutoffs = 0;
         // The LMR reduction of the child search now running for `move` (0 when
-        // it runs at full depth), for continuation logging: only in CONT_LOG
-        // builds, since even an idle field here costs nps (stack layout).
-#ifdef CONT_LOG
+        // it runs at full depth): for hindsight depth (params::hindsight_red)
+        // and continuation logging.
         int reduction = 0;
-        void set_reduction(int r) { reduction = r; }
         int logged_reduction() const { return reduction; }
-#else
-        void set_reduction(int) {}
-        int logged_reduction() const { return 0; }
-#endif
     };
 
     // Continuation history: how well a quiet move (by its piece and
     // destination) has done in reply to an earlier move (also by piece and
     // destination), one ply back (countermove history) or two (follow-up
     // history). One table serves both. Same units and update rule as
-    // history_. On the heap: 12 * 64 * 12 * 64 ints.
-    using ContTable = std::array<int, 12 * 64>;  // indexed by the reply's piece * 64 + to
+    // history_. On the heap: 12 * 64 * 12 * 64 entries.
+    using ContTable = std::array<std::int16_t, 12 * 64>;  // indexed by the reply's piece * 64 + to
     std::vector<ContTable> cont_hist_ = std::vector<ContTable>(12 * 64, ContTable{});
     // The table for replies to the move made `back` plies before `ply`, or
     // nullptr if there is none (the root, or a null move).
@@ -371,27 +411,30 @@ private:
     // Capture history: how well a capture has done, by moving piece,
     // destination and captured piece type. Same units and update rule as
     // history_.
-    std::vector<int> capt_hist_ = std::vector<int>(12 * 64 * 6, 0);
+    std::vector<std::int16_t> capt_hist_ = std::vector<std::int16_t>(12 * 64 * 6, 0);
     // Pawn history: quiet history by pawn structure (a slot of the pawn
     // key), moving piece and destination; same units and update rule as
     // history_. It joins quiet_history() weighted by params::pawn_hist_weight.
     static constexpr std::size_t PAWN_HIST_SIZE = 1024;
-    std::vector<int> pawn_hist_ = std::vector<int>(PAWN_HIST_SIZE * 12 * 64, 0);
+    std::vector<std::int16_t> pawn_hist_ =
+        std::vector<std::int16_t>(PAWN_HIST_SIZE * 12 * 64, 0);
     static std::size_t pawn_hist_index(const Position& pos, Move m) {
         return (pos.pawn_key() & (PAWN_HIST_SIZE - 1)) * 12 * 64 +
                piece_to(pos.piece_at(m.from()), m.to());
     }
     static std::size_t capture_index(const Position& pos, Move m) {
         const Piece victim = m.is_en_passant() ? WP : pos.piece_at(m.to());
-        return piece_to(pos.piece_at(m.from()), m.to()) * 6 + static_cast<std::size_t>(victim % 6);
+        return piece_to(pos.piece_at(m.from()), m.to()) * 6 + static_cast<std::size_t>(type_of(victim));
     }
 
     std::unique_ptr<TranspositionTable> own_tt_;  // none when shared
     TranspositionTable& tt_;
     Evaluator eval_;
     std::array<StackEntry, MAX_PLY + 1> stack_{};
-    // Quiet-move history, [side to move][from][to].
-    std::array<std::array<std::array<int, 64>, 64>, 2> history_{};
+    // Quiet-move history, [side to move][from][to]. This and the other
+    // history tables hold 16-bit values (see gravity()): half the cache
+    // footprint of ints.
+    std::array<std::array<std::array<std::int16_t, 64>, 64>, 2> history_{};
     // Pawn correction history (see params.h): per side to move and pawn key
     // slot, the average of searched score minus raw static eval, in units
     // of 1/CORR_GRAIN centipawn. On the heap, being too big for a stack
@@ -402,6 +445,9 @@ private:
     // Non-pawn correction history, the same per side to move and each
     // colour's non-pawn key: [side to move][colour][slot].
     std::vector<int> nonpawn_corr_ = std::vector<int>(2 * 2 * CORR_SIZE, 0);
+    // Continuation correction: [side to move][piece * 64 + destination] of
+    // the move that led to the position.
+    std::vector<int> cont_corr_ = std::vector<int>(2 * 12 * 64, 0);
     std::vector<std::uint64_t> keys_;  // game history + current search path
     std::uint64_t nodes_ = 0;
     std::uint64_t node_limit_ = 0;     // 0 = none
@@ -452,6 +498,7 @@ private:
     std::uint64_t tb_hits_ = 0;
     std::vector<Move> root_moves_;
     int root_tb_score_ = NO_EVAL;
+    Move avoid_root_{};
     // Ranks the root in the tables and sets the three above.
     void setup_tablebases(const Position& pos, bool use_dtz);
     // begin_search (or adopt_root) was done for the coming search.
@@ -497,10 +544,16 @@ private:
     // The raw static eval plus `corr`, the position's correction(), then
     // fifty-move scaling.
     int corrected_eval(const Position& pos, int raw, int corr);
+    // Continuation correction's entry for the node at `ply` (see params.h),
+    // or nullptr: off, at the root, after a null move, or with ply < 0
+    // (quiescence, whose moves aren't on the stack).
+    int* cont_corr_entry(const Position& pos, int ply);
     // The correction for the position's pawns and, weighted by
-    // params::corr_nonpawn_weight, its other pieces.
-    int correction(const Position& pos);
-    void update_correction(const Position& pos, int depth, int diff);
+    // params::corr_nonpawn_weight, its other pieces; and at a main-search
+    // node (ply >= 0), weighted by params::corr_cont_weight, the move that
+    // led to it.
+    int correction(const Position& pos, int ply);
+    void update_correction(const Position& pos, int ply, int depth, int diff);
 
     // Statistics are not counted inside verification searches, which
     // would count the same decisions twice.
@@ -538,6 +591,9 @@ private:
     int quiet_history(const Position& pos, Move m, const ContTable* const cont[2]) const;
     void update_quiet_stats(const Position& pos, Move best, const Move* tried, int n_tried,
                             int depth, int ply);
+    // A quiet hash move that cut a node off: its history bonus at `pct`
+    // percent (params::tt_cut_hist_pct).
+    void reward_hash_move(const Position& pos, Move m, int depth, int ply, int pct);
     // After a cutoff: reward `best` if it is a capture (Move{} otherwise),
     // and penalize the captures searched before it.
     void update_capture_stats(const Position& pos, Move best, const Move* tried, int n_tried,

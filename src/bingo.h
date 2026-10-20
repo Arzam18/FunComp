@@ -4,12 +4,14 @@
 #include <string>
 #include <vector>
 
-// Backrank Bingo: shuffled-piece starting positions close to normal chess,
-// for data generation and as a second opening book. Pawns, king and rooks
-// stand on their usual squares; each side's queen, bishops and knights are
-// shuffled over the b, c, d, f and g files of its back rank, with the
-// bishops on opposite colours. 18 arrangements a side (the standard one
-// among them), chosen independently for White and Black: 324 starts.
+// Chess324 (Larry Kaufman's variant, 2022; built here independently as
+// "Backrank Bingo", hence the names): shuffled-piece starting positions
+// close to normal chess, for data generation and as a second opening
+// book. Pawns, king and rooks stand on their usual squares; each side's
+// queen, bishops and knights are shuffled over the b, c, d, f and g
+// files of its back rank, with the bishops on opposite colours. 18
+// arrangements a side (the standard one among them), chosen
+// independently for White and Black: 324 starts.
 // Castling is ordinary, so any engine and GUI plays them.
 
 // The 324 starting positions as FENs, White to move, in a fixed order.

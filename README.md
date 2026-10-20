@@ -1,23 +1,38 @@
 # FunComp
 
-A UCI chess engine written in C++23 from the ground up: a classical
-evaluation (PeSTO's tables and an initiative term of my own) and a
-modern alpha-beta search in which every feature was proven in games
-before it was kept, then tuned as a whole. Version 2.0 is estimated at
-about **3280 on the CCRL Blitz scale** (3282 ± 10 from a single-threaded
-gauntlet of 2,880 games against 24 rated engines from eight families; an
-estimate on my hardware, not an official CCRL rating), about 245 above
-version 1.0. It searches with as many threads as you give it.
+A UCI chess engine written in C++23 from the ground up: a neural network
+evaluation (NNUE) trained only on FunComp's own games, and a modern
+alpha-beta search in which every feature was proven in games before it
+was kept, then tuned as a whole. Version 3.0 is estimated at about
+**3640 on the CCRL Blitz scale** (3642 ± 8 from a single-threaded
+gauntlet of 2,000 games against 20 rated engines; an estimate on my
+hardware, not an official CCRL rating), about 360 above version 2.0.
+It searches with as many threads as you give it.
 
 ## Features
 
 - **Board:** bitboards with magic sliders, legal move generation,
   make/unmake, Zobrist hashing; move generation verified by perft.
-- **Evaluation:** PeSTO's tapered piece-square tables, updated
-  incrementally. Correction history (by pawn structure, and by each
-  side's non-pawn material) learns during the search how far the static
-  eval tends to be off and corrects it; scores shrink toward a draw as
-  the fifty-move counter runs.
+- **Evaluation:** an NNUE built into the executable: 768 piece-square
+  inputs for each of 7 king buckets (by the king's square, mirrored so
+  the king stands on the queen's side), a 1,024-wide hidden layer per
+  side, squared clipped ReLU, and 8 output buckets by material. The
+  hidden layer is updated incrementally with each move, and a cache of
+  each king bucket's last accumulator spares a rebuild when the king
+  changes bucket. Correction history (by pawn structure, by each side's
+  non-pawn material, and by the previous move) learns during the search
+  how far the static eval tends to be off and corrects it; scores shrink
+  toward a draw as the fifty-move counter runs.
+- **Training:** the network learned from 1.44 billion positions of
+  FunComp's own self-play in three rounds, each labelled by FunComp's own
+  search (the first with 2.0's hand-written evaluation, the later ones
+  with the previous round's network) and blended with the games' results.
+  Openings came from random plies, Chess324 starts, and positions
+  from the Lichess open database (as starting positions only). No other
+  engine's games, evaluations or networks were used.
+- **The hand-written evaluation** of 2.0 is still there (`EvalFile`
+  `<empty>`): PeSTO's tapered piece-square tables, and the two terms
+  below.
 - **Initiative:** a term for who is making the other side respond:
   threats pending against the side to move and threats it holds, safe
   mobility, territory, coordination, pawn-push threats, safe checks,
@@ -56,8 +71,9 @@ version 1.0. It searches with as many threads as you give it.
 Every change was tested in games (an SPRT against the previous best
 version) before it was kept. For 2.0, all of the search's parameters
 (about 110) were then tuned together by SPSA in two full passes, and the
-time management in a pass of its own; ideas that did not pay are still
-in the code, switched off. Every margin
+time management in a pass of its own; for 3.0 the search was tuned again
+for the network (2,000 iterations, 108 parameters). Ideas that did not pay
+are still in the code, switched off. Every margin
 and threshold lives in `src/params.h`, and the search reaches them through
 `src/pruning.h`, which is built so that a learned model can later guide
 the pruning (see "Learned pruning" below).
@@ -66,13 +82,17 @@ the pruning (see "Learned pruning" below).
 
 FunComp speaks UCI: load it in any UCI GUI (Arena, Cute Chess, BanksiaGUI,
 En Croissant, ...) or match runner (fastchess, cutechess-cli). The release
-has two Windows binaries:
+has two Windows binaries, each with the network inside:
 
-- `funcomp-2.0-x86-64-v3.exe` for CPUs with AVX2 and BMI2 (Intel
+- `funcomp-3.0-x86-64-v3.exe` for CPUs with AVX2 and BMI2 (Intel
   Haswell, AMD Zen and later): the faster one;
-- `funcomp-2.0-x86-64.exe` for any 64-bit x86 CPU.
+- `funcomp-3.0-x86-64.exe` for any 64-bit x86 CPU.
 
 Options:
+
+- `EvalFile` (default `<embedded>`): the network built into the binary;
+  a path to a `.nnue` file loads another, `<empty>` the hand-written
+  evaluation.
 
 - `Hash` (MB, default 64, 1-4096): transposition table size.
 - `Threads` (default 1, 1-256): search threads (Lazy SMP: they share
@@ -107,17 +127,26 @@ pstats                pruning statistics since the last "pstats reset"
 pstats reset
 genlabels ...         write labels for the learned pruning guide (below)
 genbingo out=<file> [plies=N perstart=N nodes=N maxscore=CP seed=N hash=MB]
-                      Backrank Bingo openings: the standard back rank
-                      with queen, opposite-coloured bishops and knights
-                      shuffled over b, c, d, f and g (324 starts)
+                      Chess324 openings (Larry Kaufman's variant): kings,
+                      rooks and pawns at home, queen, opposite-coloured
+                      bishops and knights shuffled over b, c, d, f and g,
+                      each side independently (324 starts)
 genconlog ...         continuation logs (research builds only, configured
                       with -DCONT_LOG=ON; see src/cont_log.h)
+gendata out=<file> ...
+                      self-play training data: positions with their
+                      search scores and the games' results (src/datagen.h
+                      lists the options)
+datatext in=<data> out=<file> ...
+                      training text from it, with the export's filters
+datastats in=<data>   totals and distributions of a data file
 telemetry in=<pgn> [positions=N nodes=N verify=N minply=N seed=N]
                       pruning and feature counters, with verification,
                       on positions sampled from the games of a PGN file
 ```
 
-The bench node count is the search's signature (1614718 for 2.0): a
+The bench node count is the search's signature (1187868 for 3.0 with its
+network; 1614718 for 2.0): a
 change meant to alter the search changes it, and a refactor or speedup
 must not.
 
@@ -133,14 +162,20 @@ ctest --test-dir build --output-on-failure
 ```
 
 For builds that run on other machines, `-DARCH=` sets the CPU level:
-`x86-64` runs on any 64-bit x86 CPU, `x86-64-v3` needs AVX2 and BMI2 and
-is faster. Both search identically (same bench). Without it the
-compiler's default is used; `-DNATIVE=ON` targets the build machine.
+`x86-64-v2` (the default) needs POPCNT and SSE4.2, which every x86-64
+CPU since about 2009 has; `x86-64-v3` needs AVX2 and BMI2 and is
+faster. All search identically (same bench). `-DARCH=x86-64` runs on
+any 64-bit x86 CPU but is about 5% slower, having no popcount
+instruction; `-DNATIVE=ON` targets the build machine.
 
 ```bash
-cmake -S . -B build-x86-64 -DARCH=x86-64
+cmake -S . -B build-v2 -DARCH=x86-64-v2
 cmake -S . -B build-v3 -DARCH=x86-64-v3
 ```
+
+The network `nets/funcomp-3.0.nnue` is compiled into the executable;
+`-DEMBED_NET=<file>` embeds another, `-DEMBED_NET=` none (then only
+`EvalFile` loads one).
 
 `-DTUNE=ON` advertises every search parameter as a UCI option (and
 `PruneVerify`, below), for tuning and for tests that change parameters.
@@ -301,6 +336,14 @@ decades of published work by the chess-programming community.
 - **Evaluation.** The piece-square tables and material values are
   PeSTO's, by Ronald Friederich, as published on the Chess Programming
   Wiki.
+- **NNUE.** The efficiently updatable network was invented by Yu Nasu
+  for shogi; Stockfish brought it to chess, and its use there influenced
+  FunComp's. FunComp's network, its features, its data and its inference
+  code are its own. The trainer is built on bullet by Jamie Whiting (MIT
+  licence). Starting positions for some training games came from the
+  Lichess open database (CC0); others are Chess324, Larry Kaufman's
+  variant (2022), which FunComp's opening generator arrived at
+  independently before I learned it already existed.
 - **Tablebases.** Syzygy tables and their original probing code are by
   Ronald de Man; FunComp reads them through Fathom (basil00, Jon Dart;
   MIT licence, in `third_party/fathom` with its licence file).
@@ -313,8 +356,9 @@ decades of published work by the chess-programming community.
   rating gauntlets are played against engines generously published by
   their authors: Stash (Morgan Houppin), Booot (Alex Morozov), Reckless,
   Akimbo (Jamie Whiting), RubiChess (Andreas Matthies), Seer (Connor
-  McMonigle), Igel (V. Medvedev, V. Shcherbyna) and Clover (Luca
-  Metehau).
+  McMonigle), Igel (V. Medvedev, V. Shcherbyna), Clover (Luca
+  Metehau), PlentyChess (Yoshie2000) and Stockfish (the Stockfish
+  developers).
 
 ## License
 

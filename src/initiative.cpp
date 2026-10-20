@@ -127,21 +127,15 @@ void compute_side(const Position& pos, Color c, Bitboard their_pawn_attacks, int
 }
 
 // The two largest gains `c` threatens against the other side's pieces: a
-// piece attacked and undefended is worth its value; one attacked by a
-// cheaper piece, its value less the attacker's.
+// piece attacked and undefended is worth its value; a defended one
+// attacked by a cheaper piece, its value less the cheapest attacker's.
+// Pieces are taken a set at a time: within a type, all the undefended ones
+// gain the same, and so do all the defended ones with the same cheapest
+// attacker, and only two of a kind can matter.
 void threats(const Position& pos, Color c, const Side& us, const Side& them, int& t1, int& t2) {
     t1 = t2 = 0;
-    const Color o = opposite(c);
-    for (int pt = P; pt <= Q; ++pt) {
-        for (Bitboard b = pieces_of(pos, o, pt) & us.all; b; b &= b - 1) {
-            const Bitboard sq = bit(std::countr_zero(b));
-            const int value = SEE_VALUE[pt];
-            int gain = (them.all & sq) ? 0 : value;
-            for (int a = P; a < pt; ++a)
-                if (us.by[a] & sq) {
-                    gain = std::max(gain, value - SEE_VALUE[a]);
-                    break;
-                }
+    auto add = [&](int gain, Bitboard set) {
+        for (int k = 0; k < 2 && set; ++k, set &= set - 1) {
             if (gain > t1) {
                 t2 = t1;
                 t1 = gain;
@@ -149,6 +143,21 @@ void threats(const Position& pos, Color c, const Side& us, const Side& them, int
                 t2 = gain;
             }
         }
+    };
+    const Color o = opposite(c);
+    Bitboard cheaper = 0;  // attacked by our pieces of a type below pt
+    for (int pt = P; pt <= Q; ++pt) {
+        const Bitboard attacked = pieces_of(pos, o, pt) & us.all;
+        if (attacked) {
+            const int value = SEE_VALUE[pt];
+            add(value, attacked & ~them.all);
+            Bitboard rest = attacked & them.all & cheaper;
+            for (int a = P; rest; ++a) {
+                add(value - SEE_VALUE[a], rest & us.by[a]);
+                rest &= ~us.by[a];
+            }
+        }
+        cheaper |= us.by[pt];
     }
 }
 

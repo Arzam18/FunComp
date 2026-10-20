@@ -28,6 +28,10 @@ enum Piece : int {
     NO_PIECE = -1
 };
 
+// A piece's type as an index, 0 (pawn) to 5 (king), and -1 for NO_PIECE: the
+// same as p % 6 without a signed division.
+constexpr int type_of(int p) { return p >= BP ? p - BP : p; }
+
 constexpr int piece_index(Color c, PieceType pt) {
     return static_cast<int>(pt) + (c == Color::Black ? 6 : 0);
 }
@@ -51,23 +55,24 @@ struct Move {
 
     // bits 0..5: from
     // bits 6..11: to
-    // bits 12..14: promotion PieceType (1..5), 0 = none
+    // bits 12..14: promotion PieceType XOR 6, so that 0 is none (PieceType::None
+    // is 6) and decoding needs no branch: queen 2, bishop 4, rook 5, knight 7
     // bit 15: en-passant flag
     Move() = default;
+    static constexpr int PROMO_XOR = static_cast<int>(PieceType::None);
 
     constexpr Move(int from, int to, PieceType promotion = PieceType::None,
                    bool en_passant = false)
         : data(static_cast<std::uint16_t>(
               from | (to << 6) |
-              ((promotion == PieceType::None ? 0 : static_cast<int>(promotion)) << 12) |
+              ((static_cast<int>(promotion) ^ PROMO_XOR) << 12) |
               (en_passant ? 0x8000 : 0))) {}
 
     constexpr int from() const { return data & 63; }
     constexpr int to() const { return (data >> 6) & 63; }
 
     constexpr PieceType promotion() const {
-        const int p = (data >> 12) & 7;
-        return p == 0 ? PieceType::None : static_cast<PieceType>(p);
+        return static_cast<PieceType>(((data >> 12) & 7) ^ PROMO_XOR);
     }
 
     constexpr bool is_en_passant() const { return (data & 0x8000) != 0; }

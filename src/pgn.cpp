@@ -54,38 +54,94 @@ void add_moves(const std::string& text, int& depth, bool& in_comment,
 
 }  // namespace
 
-std::vector<Game> read(std::istream& in) {
-    std::vector<Game> games;
-    Game game;
-    bool has_moves = false, has_tags = false;
+const std::string& Game::tag(const std::string& name) const {
+    static const std::string none;
+    for (const auto& [n, v] : tags)
+        if (n == name) return v;
+    return none;
+}
+
+bool Reader::next(Game& game) {
+    // Cleared, not replaced: the buffers are reused from game to game.
+    game.fen.clear();
+    game.moves.clear();
+    game.result.clear();
+    game.tags.clear();
+    game.movetext.clear();
+    bool has_movetext = false, has_tags = false;
     int depth = 0;
     bool in_comment = false;
-    auto finish = [&] {
-        if (has_tags || has_moves) {
-            if (game.fen.empty()) game.fen = START_FEN;
-            games.push_back(game);
+    std::string& line = line_;
+    for (;;) {
+        if (has_pending_) {
+            line.swap(pending_);
+            has_pending_ = false;
+        } else if (!std::getline(in_, line)) {
+            break;
         }
-        game = Game{};
-        has_moves = has_tags = false;
-        depth = 0;
-        in_comment = false;
-    };
-    std::string line;
-    while (std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         if (!in_comment && !line.empty() && line[0] == '[') {
-            if (has_moves) finish();  // tags after movetext start a new game
+            if (has_movetext) {  // tags after movetext start a new game
+                pending_.swap(line);
+                has_pending_ = true;
+                break;
+            }
             has_tags = true;
-            std::string value;
-            if (tag_value(line, "FEN", value)) game.fen = value;
-            else if (tag_value(line, "Result", value)) game.result = value;
+            // `[Name "value"]`
+            const auto space = line.find(' ');
+            if (space != std::string::npos && space > 1) {
+                std::string value;
+                std::string name = line.substr(1, space - 1);
+                if (tag_value(line, name, value)) {
+                    if (name == "FEN") game.fen = value;
+                    else if (name == "Result") game.result = value;
+                    game.tags.emplace_back(std::move(name), std::move(value));
+                }
+            }
             continue;
         }
-        const std::size_t before = game.moves.size();
-        add_moves(line, depth, in_comment, game.moves);
-        has_moves |= game.moves.size() > before;
+        if (line.find_first_not_of(" \t") == std::string::npos) continue;
+        has_movetext = true;
+        if (split_) {
+            add_moves(line, depth, in_comment, game.moves);
+            continue;
+        }
+        // Unsplit: only the comments are followed, for the tag test above.
+        for (const char c : line) {
+            if (in_comment) {
+                if (c == '}') in_comment = false;
+            } else if (c == '{') {
+                in_comment = true;
+            } else if (c == ';') {
+                break;
+            }
+        }
+        game.movetext += line;
+        game.movetext += '\n';
     }
-    finish();
+    if (!has_tags && !has_movetext) return false;
+    if (game.fen.empty()) game.fen = START_FEN;
+    return true;
+}
+
+void split_moves(Game& game) {
+    game.moves.clear();
+    int depth = 0;
+    bool in_comment = false;
+    std::size_t start = 0;
+    while (start < game.movetext.size()) {
+        std::size_t end = game.movetext.find('\n', start);
+        if (end == std::string::npos) end = game.movetext.size();
+        add_moves(game.movetext.substr(start, end - start), depth, in_comment, game.moves);
+        start = end + 1;
+    }
+}
+
+std::vector<Game> read(std::istream& in) {
+    std::vector<Game> games;
+    Reader reader(in);
+    Game game;
+    while (reader.next(game)) games.push_back(game);
     return games;
 }
 
@@ -104,7 +160,7 @@ Move parse_san(const Position& pos, const std::string& san) {
         const int step = s.size() == 3 ? 2 : -2;
         for (int i = 0; i < count; ++i) {
             const Move m = legal(i);
-            if (pos.piece_at(m.from()) % 6 == static_cast<int>(PieceType::King) &&
+            if (type_of(pos.piece_at(m.from())) == static_cast<int>(PieceType::King) &&
                 m.to() == m.from() + step)
                 return m;
         }
@@ -139,7 +195,7 @@ Move parse_san(const Position& pos, const std::string& san) {
     for (int i = 0; i < count; ++i) {
         const Move m = legal(i);
         if (m.to() != to || m.promotion() != promo) continue;
-        if (pos.piece_at(m.from()) % 6 != static_cast<int>(type)) continue;
+        if (type_of(pos.piece_at(m.from())) != static_cast<int>(type)) continue;
         bool ok = true;
         for (const char h : from_hint) {
             if (h >= 'a' && h <= 'h') ok &= file_of(m.from()) == h - 'a';

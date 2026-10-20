@@ -1,5 +1,82 @@
 # Changelog
 
+## FunComp 3.0 (2026-10-20)
+
+The first FunComp with a neural network evaluation (NNUE), trained only on
+FunComp's own games.
+
+**Strength.** About **3640 on the CCRL Blitz scale**: 3642 ± 8 from a
+single-threaded gauntlet of 2,000 games at 10+0.1 against 20 rated engines
+(CCRL Blitz 3492-3793), about 360 above 2.0 measured the same way (3282 ± 10). Against 2.0
+directly: +484 ± 33 Elo in 1,000 self-play games from balanced openings
+(8+0.08: 888 wins, 108 draws, 4 losses). An
+estimate on our hardware, not an official CCRL rating.
+
+**Binaries.**
+- `funcomp-3.0-x86-64-v3.exe`: for CPUs with AVX2 and BMI2 (Intel
+  Haswell, AMD Zen and later). The faster build.
+- `funcomp-3.0-x86-64.exe`: for any 64-bit x86 CPU.
+
+Both search identically (bench 1187868 nodes), are statically linked, and
+carry the network inside the executable: nothing to download or set.
+
+**New UCI option.** `EvalFile` (default `<embedded>`: the network built
+into the binary). A path loads another network; `<empty>` switches to the
+hand-written evaluation of 2.0.
+
+**What's new.**
+- *The network.* 768 piece-square inputs for each of 7 king buckets (by
+  the king's square, mirrored so the king stands on the queen's side), a
+  1,024-wide hidden layer for each side to move, squared clipped ReLU, and
+  8 output buckets by material. Updated incrementally move by move, with a
+  cache of each king bucket's last accumulator, so a king move doesn't
+  rebuild it from scratch.
+- *Its data.* 1.44 billion positions from FunComp's own self-play in
+  three rounds, each labelled by FunComp's own search (round 1 with 2.0's
+  hand-written evaluation, rounds 2 and 3 with the network of the round
+  before), blended with the games' results. Openings: random plies from
+  the standard position, Chess324 starts (Larry Kaufman's variant), and
+  (round 3) positions from the Lichess open database (CC0), used as
+  starting positions only.
+  No other engine's games, evaluations or networks were used.
+- *Its training.* Our own trainer on the bullet library (GPU), 120
+  passes of 100 million positions. The width, king buckets, later layers
+  and input features were chosen by games: matches at fixed nodes against
+  a reference network, then timed matches, then a round robin of the three
+  finalists at 2+1 (a tie; the simplest and fastest, without later layers,
+  ships).
+- *Search.* Two features carried over from the 2.0-era tuning branch
+  and kept after tests: correction history by the previous move
+  (continuation correction), and hindsight depth (a node whose parent
+  was reduced gets a ply back if the parent's move cost nothing, or one
+  less if it cost a lot). The whole search re-tuned by SPSA for the
+  network (2,000 iterations, 108 parameters).
+- *Speed.* The network's output in AVX2: about 2.7 million nodes a second
+  on one thread of a Ryzen 9 5900X for the x86-64-v3 build (bench), about
+  1.5 million for the portable x86-64 build; 2.0's hand-written
+  evaluation searched about 3.6 million.
+
+**Checked before release.**
+- A stress run of 8,000 games on both builds (bullet, 1 s + 0.01 s, and 40
+  moves in 10 s, 24 at a time): no crashes, disconnects or illegal moves;
+  no time losses at 40 moves in 10 s (see the limitations for bullet).
+- Threads with tablebases in bullet (4 threads, Syzygy, 2+0.02, five
+  games at a time), 2,000 games: no failures.
+- No time losses in the 5,000 timed games of the gauntlet, the tune's
+  confirmation and the match against 2.0.
+
+**Known limitations.**
+- No Chess960.
+- In bullet with every hardware thread busy (1 s + 0.01 s, 24 games on
+  24 hardware threads), about 3 games in 1,000 were lost on time, by up
+  to 61 ms, most likely to the operating system's scheduling: raise
+  `Move Overhead` (default 30 ms) in such setups.
+
+**Next.** Round 4's data (in generation: better labels from a deeper
+search and a second, backward pass over each game; more positions), then
+a network chosen by forecasts from the learning curves, and the learned
+guide for the search's pruning.
+
 ## FunComp 2.0 (2026-10-02)
 
 The complete classical engine: multi-threaded, with tablebases and

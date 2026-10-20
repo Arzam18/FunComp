@@ -504,7 +504,7 @@ bool Position::gives_check(Move m) const {
     const int from = m.from(), to = m.to();
     const Piece moving = board_[from];
     const PieceType pt =
-        m.promotion() != PieceType::None ? m.promotion() : static_cast<PieceType>(moving % 6);
+        m.promotion() != PieceType::None ? m.promotion() : static_cast<PieceType>(type_of(moving));
 
     // Occupancy after the move.
     Bitboard occ = (occupied_ ^ bit(from)) | bit(to);
@@ -542,14 +542,15 @@ bool Position::gives_check(Move m) const {
 
 bool Position::is_legal(Move m) const {
     const int from = m.from(), to = m.to();
-    const int promo_bits = (m.data >> 12) & 7;  // 1-4: knight to queen
+    const int promo_bits = (m.data >> 12) & 7;  // 0: none (see Move)
+    const PieceType promo = m.promotion();
     const Piece p = board_[from];
     const Color us = side_, them = opposite(us);
     if (p == NO_PIECE || (p < BP ? Color::White : Color::Black) != us) return false;
     if (from == to || (color_bb_[static_cast<int>(us)] & bit(to))) return false;
-    if (promo_bits > 4) return false;
+    if (promo_bits && (promo < PieceType::Knight || promo > PieceType::Queen)) return false;
 
-    const auto pt = static_cast<PieceType>(p % 6);
+    const auto pt = static_cast<PieceType>(type_of(p));
     const Bitboard theirs = color_bb_[static_cast<int>(them)];
     const Bitboard king = bb_[piece_index(us, PieceType::King)];
     if (!king) return false;
@@ -785,7 +786,7 @@ bool Position::gives_check(Move m, const CheckInfo& ci) const {
     if (ci.king_square < 0) return false;
     const int from = m.from(), to = m.to();
     const Piece moving = board_[from];
-    const auto pt = static_cast<PieceType>(moving % 6);
+    const auto pt = static_cast<PieceType>(type_of(moving));
 
     // Promotions, en passant (two squares vacated) and castling (the rook
     // moves too) are rare enough to take the full test.

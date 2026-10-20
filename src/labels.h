@@ -80,6 +80,12 @@ struct LabelOptions {
     int hash_mb = 16;              // driver searcher
     int label_hash_mb = 2;         // labelling searcher, cleared before every label
     std::uint64_t label_node_cap = 0;  // per labelling search, 0 = none (see above)
+    // Try 6 (ROADMAP): after each label, the same search of the null position
+    // (side to move flipped, en passant cleared; legal, the node not being in
+    // check) from a fresh table, its score at every depth in a last column,
+    // null_curve. Its scores are from the other side's view, so the
+    // temperature at depth d is score_curve[d] + null_curve[d].
+    bool null_probe = false;
 };
 
 // Returns the number of rows written. Progress and errors go to `log` as
@@ -89,8 +95,8 @@ std::uint64_t generate_labels(const LabelOptions& opt, std::ostream& log);
 // The CSV header, and one row: `sample` labelled with `labeller` (whose
 // hash table and history are cleared first). Empty if the sample can't be
 // labelled (bad FEN, or in check).
-std::string label_header();
 // `group` and `rate` fill their columns; `node_cap` limits the labelling
 // search (0: none).
+std::string label_header(bool null_probe = false);
 std::string label_row(Searcher& labeller, const LabelSample& sample, std::uint64_t group = 0,
-                      std::uint64_t rate = 0, std::uint64_t node_cap = 0);
+                      std::uint64_t rate = 0, std::uint64_t node_cap = 0, bool null_probe = false);

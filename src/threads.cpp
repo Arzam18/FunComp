@@ -43,7 +43,8 @@ Move ThreadPool::search(Position& pos, const SearchLimits& limits,
         h.adopt_root(lead);
         helper_pos_[i - 1] = pos;
         helpers.push_back(&h);
-        workers_[i - 1]->start([&h, &p = helper_pos_[i - 1], &history, helper_limits] {
+        // `history` by value: the caller's may be gone before a helper starts.
+        workers_[i - 1]->start([&h, &p = helper_pos_[i - 1], history, helper_limits] {
             h.search(p, helper_limits, history, false);
         });
     }

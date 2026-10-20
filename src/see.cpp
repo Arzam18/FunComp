@@ -29,8 +29,8 @@ int see(const Position& pos, Move m) {
     // capture 0), if the exchange stops right after it.
     int gain[32];
     int d = 0;
-    gain[0] = victim == NO_PIECE ? 0 : SEE_VALUE[victim % 6];
-    int on_square = SEE_VALUE[pos.piece_at(m.from()) % 6];  // piece now standing on `to`
+    gain[0] = victim == NO_PIECE ? 0 : SEE_VALUE[type_of(victim)];
+    int on_square = SEE_VALUE[type_of(pos.piece_at(m.from()))];  // piece now standing on `to`
     if (m.promotion() != PieceType::None) {
         const int promoted = SEE_VALUE[static_cast<int>(m.promotion())];
         gain[0] += promoted - SEE_VALUE[0];
@@ -98,17 +98,20 @@ bool see_at_least(const Position& pos, Move m, int threshold) {
 
     // The exchange wins at most the victim, plus what a promotion adds (the
     // other side may decline to recapture), and at least that less the
-    // piece left on the square (we may stop after one recapture: the other
-    // side's pawns can't capture onto our promotion rank, so its first
-    // recapture never promotes). Most calls are settled by these bounds.
+    // piece left on the square (we may stop after one recapture), less a
+    // promotion's worth more on our own back rank, where the other side's
+    // first recapture can be a pawn promoting. Most calls are settled by
+    // these bounds.
     const Piece victim = pos.piece_at(m.to());
-    int most = victim == NO_PIECE ? 0 : SEE_VALUE[victim % 6];
-    int on_square = SEE_VALUE[pos.piece_at(m.from()) % 6];
+    int most = victim == NO_PIECE ? 0 : SEE_VALUE[type_of(victim)];
+    int on_square = SEE_VALUE[type_of(pos.piece_at(m.from()))];
     if (promo != PieceType::None) {
         most += SEE_VALUE[static_cast<int>(promo)] - SEE_VALUE[0];
         on_square = SEE_VALUE[static_cast<int>(promo)];
     }
-    const int least = most - on_square;
+    const int own_back_rank = pos.side_to_move() == Color::White ? 0 : 7;
+    const bool enemy_promotes = params::see_promo && rank_of(m.to()) == own_back_rank;
+    const int least = most - on_square - (enemy_promotes ? SEE_VALUE[4] - SEE_VALUE[0] : 0);
     if (most < threshold) return false;
     if (least >= threshold) return true;
     return see(pos, m) >= threshold;

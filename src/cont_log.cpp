@@ -136,7 +136,8 @@ std::uint64_t generate_cont_log(const ContLogOptions& opt, std::ostream& log) {
     for (int g = 0; g < opt.games; ++g) {
         Position pos;
         std::vector<std::uint64_t> history;
-        std::vector<StateInfo> states(1024);
+        // Room for the random plies (unclamped) and a game after them.
+        std::vector<StateInfo> states(static_cast<std::size_t>(std::max(opt.random_plies, 0)) + 1024);
         std::size_t made = 0;
         auto play = [&](Move m) {
             history.push_back(pos.key());

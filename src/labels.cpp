@@ -80,24 +80,26 @@ void write_params(const LabelOptions& opt) {
         << "\ndepth=" << opt.depth << "\nsample=" << opt.sample_rate
         << "\ndepthscale=" << opt.depth_scale << "\nmaxdepth=" << opt.max_label_depth
         << "\nseed=" << opt.seed << "\nhash=" << opt.hash_mb << "\nlabelhash=" << opt.label_hash_mb
-        << "\nlabelnodes=" << opt.label_node_cap << "\n# search parameters\n";
+        << "\nlabelnodes=" << opt.label_node_cap << "\nnullprobe=" << opt.null_probe
+        << "\n# search parameters\n";
     for (const auto& t : params::tunables()) out << t.name << '=' << *t.value << '\n';
 }
 
 }  // namespace
 
-std::string label_header() {
+std::string label_header(bool null_probe) {
     std::string h =
         "fen,depth,ply,static_eval,correction,search_eval,alpha,beta,improving,node,under_null,iir,"
         "score,mate";
     for (const char* name : features::NAMES) (h += ',') += name;
     h += ",group,rate,tt_hit,tt_depth,tt_bound,tree_nodes,reached_moves,fresh_nodes,censored,"
          "fresh_curve,score_curve";
+    if (null_probe) h += ",null_curve";
     return h;
 }
 
 std::string label_row(Searcher& labeller, const LabelSample& s, std::uint64_t group,
-                      std::uint64_t rate, std::uint64_t node_cap) {
+                      std::uint64_t rate, std::uint64_t node_cap, bool null_probe) {
     Position pos;
     if (!pos.set_fen(s.fen) || pos.in_check(pos.side_to_move())) return {};
 
@@ -131,6 +133,19 @@ std::string label_row(Searcher& labeller, const LabelSample& s, std::uint64_t gr
     row << ',';
     for (std::size_t i = 0; i < iters.size(); ++i)
         row << (i ? ";" : "") << std::clamp(iters[i].score, -LABEL_SCORE_CLIP, LABEL_SCORE_CLIP);
+    if (null_probe) {
+        // Try 6: the null position's scores at every depth, from a fresh
+        // table (its side to move is the other one: T = score + null).
+        StateInfo st;
+        Position null = pos;
+        null.make_null_move(st);
+        labeller.new_game();
+        labeller.search(null, limits, {}, false);
+        row << ',';
+        const auto& null_iters = labeller.iterations();
+        for (std::size_t i = 0; i < null_iters.size(); ++i)
+            row << (i ? ";" : "") << std::clamp(null_iters[i].score, -LABEL_SCORE_CLIP, LABEL_SCORE_CLIP);
+    }
     return row.str();
 }
 
@@ -140,7 +155,7 @@ std::uint64_t generate_labels(const LabelOptions& opt, std::ostream& log) {
         log << "info string genlabels: cannot open " << opt.out << std::endl;
         return 0;
     }
-    out << label_header() << '\n';
+    out << label_header(opt.null_probe) << '\n';
     write_params(opt);
 
     Searcher driver(static_cast<std::size_t>(opt.hash_mb));
@@ -166,7 +181,7 @@ std::uint64_t generate_labels(const LabelOptions& opt, std::ostream& log) {
             if (done()) break;
             const std::string row = label_row(labeller, s, group,
                                               rates[static_cast<std::size_t>(s.depth)],
-                                              opt.label_node_cap);
+                                              opt.label_node_cap, opt.null_probe);
             if (row.empty()) continue;
             out << row << '\n';
             ++written;
@@ -196,7 +211,8 @@ std::uint64_t generate_labels(const LabelOptions& opt, std::ostream& log) {
         for (int g = 0; g < opt.games && !done(); ++g) {
             Position pos;
             std::vector<std::uint64_t> history;
-            std::vector<StateInfo> states(1024);
+            // Room for the random plies (unclamped) and a game after them.
+            std::vector<StateInfo> states(static_cast<std::size_t>(std::max(opt.random_plies, 0)) + 1024);
             std::size_t made = 0;
             auto play = [&](Move m) {
                 history.push_back(pos.key());

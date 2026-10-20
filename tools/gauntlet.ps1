@@ -20,6 +20,8 @@ tools\gauntlet.ps1 -Engine engines\best.exe
 #>
 param(
     [string] $Engine = 'engines\best.exe',
+    # Options for FunComp itself, as "option.Name=value" (e.g. its EvalFile).
+    [string[]] $EngineOptions = @(),
     # Opponents as "file=CCRL rating", optionally followed by ";name=..."
     # (the name in the PGN; default the file's base name) and any
     # ";option.Name=value" the opponent needs, e.g. a network file.
@@ -41,7 +43,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$fcArgs = @('-engine', "cmd=$((Resolve-Path $Engine).Path)", 'name=FunComp')
+$fcArgs = @('-engine', "cmd=$((Resolve-Path $Engine).Path)", 'name=FunComp') + $EngineOptions
 foreach ($o in $Opponents) {
     $parts = $o -split ';'
     $file, $rating = $parts[0] -split '=', 2

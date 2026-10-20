@@ -66,7 +66,7 @@ void TranspositionTable::store(std::uint64_t key, Move move, int score, int eval
     e.move = move;
     e.score = static_cast<std::int16_t>(score);
     e.eval = static_cast<std::int16_t>(eval);
-    e.depth = static_cast<std::int8_t>(depth);
+    e.depth = static_cast<std::int8_t>(std::clamp(depth, -128, 127));  // depth can exceed 127 with extensions
     e.gen_bound = static_cast<std::uint8_t>(generation_ << 3 | (pv ? 4 : 0) | bound);
     c.slot[slot].write(e);
 }
@@ -315,7 +315,7 @@ public:
                     if (cont4_)
                         score += (*cont4_)[piece_to(pos_.piece_at(m.from()), m.to())] *
                                  params::cont_hist4_weight / 256;
-                    if (ci.checking_from[pos_.piece_at(m.from()) % 6] & bit(m.to()))
+                    if (ci.checking_from[type_of(pos_.piece_at(m.from()))] & bit(m.to()))
                         score += params::quiet_check_bonus;
                     quiet_scores_[static_cast<std::size_t>(i)] = score;
                 }
@@ -426,16 +426,29 @@ void Searcher::clear_history() {
         for (auto& from : side) from.fill(0);
     std::fill(pawn_corr_.begin(), pawn_corr_.end(), 0);
     std::fill(nonpawn_corr_.begin(), nonpawn_corr_.end(), 0);
+    std::fill(cont_corr_.begin(), cont_corr_.end(), 0);
     for (auto& t : cont_hist_) t.fill(0);
     std::fill(capt_hist_.begin(), capt_hist_.end(), 0);
     std::fill(pawn_hist_.begin(), pawn_hist_.end(), 0);
 }
 
-int Searcher::correction(const Position& pos) {
+int* Searcher::cont_corr_entry(const Position& pos, int ply) {
+    if (!params::corr_cont_weight || ply < 1) return nullptr;
+    const StackEntry& prev = stack_[static_cast<std::size_t>(ply - 1)];
+    if (prev.piece == NO_PIECE || prev.move == Move{}) return nullptr;
+    return &cont_corr_[static_cast<std::size_t>(pos.side_to_move()) * 12 * 64 +
+                       piece_to(prev.piece, prev.move.to())];
+}
+
+int Searcher::correction(const Position& pos, int ply) {
     const long long nonpawn =
         nonpawn_entry(pos, Color::White) + nonpawn_entry(pos, Color::Black);
-    return correction_entry(pos) / CORR_GRAIN +
-           static_cast<int>(nonpawn * params::corr_nonpawn_weight / (256LL * CORR_GRAIN));
+    int corr = correction_entry(pos) / CORR_GRAIN +
+               static_cast<int>(nonpawn * params::corr_nonpawn_weight / (256LL * CORR_GRAIN));
+    if (const int* cont = cont_corr_entry(pos, ply))
+        corr += static_cast<int>(static_cast<long long>(*cont) * params::corr_cont_weight /
+                                 (256LL * CORR_GRAIN));
+    return corr;
 }
 
 int Searcher::corrected_eval(const Position& pos, int raw, int corr) {
@@ -454,15 +467,17 @@ int Searcher::corrected_eval(const Position& pos, int raw, int corr) {
 // own distance to `diff`: then every table would learn the whole gap, and
 // their sum would overshoot it). With the non-pawn weight at 0 this is the
 // pawn table's plain running average.
-void Searcher::update_correction(const Position& pos, int depth, int diff) {
+void Searcher::update_correction(const Position& pos, int ply, int depth, int diff) {
     const int weight = std::min(depth + 1, params::corr_weight_max);
     const int limit = params::corr_limit * CORR_GRAIN;
     const long long target = static_cast<long long>(diff) * CORR_GRAIN;
     int& pawn = correction_entry(pos);
     int& white = nonpawn_entry(pos, Color::White);
     int& black = nonpawn_entry(pos, Color::Black);
+    int* const cont = cont_corr_entry(pos, ply);
     const long long total =
-        pawn + (static_cast<long long>(white) + black) * params::corr_nonpawn_weight / 256;
+        pawn + (static_cast<long long>(white) + black) * params::corr_nonpawn_weight / 256 +
+        (cont ? static_cast<long long>(*cont) * params::corr_cont_weight / 256 : 0);
     const long long error = target - total;
     auto update = [&](int& entry) {
         const long long updated = (static_cast<long long>(entry) * 256 + error * weight) / 256;
@@ -471,6 +486,7 @@ void Searcher::update_correction(const Position& pos, int depth, int diff) {
     update(pawn);
     update(white);
     update(black);
+    if (cont) update(*cont);
 }
 
 Searcher::ContTable* Searcher::cont_table(int ply, int back) {
@@ -509,9 +525,9 @@ void Searcher::score_moves(const Position& pos, const MoveList& moves, int count
         if (victim != NO_PIECE) {
             // Least valuable attacker only breaks ties, until capture
             // history has something to say.
-            const int attacker = pos.piece_at(m.from()) % 6;
+            const int attacker = type_of(pos.piece_at(m.from()));
             s = (see_at_least(pos, m, 0) ? CAPTURE_BASE : BAD_CAPTURE_BASE) +
-                8 * ORDER_VALUE[victim % 6] +
+                8 * ORDER_VALUE[type_of(victim)] +
                 capt_hist_[capture_index(pos, m)] * params::capt_hist_mult / 1024 - attacker;
         } else if (promo != PieceType::None) {
             s = 0;
@@ -528,11 +544,20 @@ void Searcher::score_moves(const Position& pos, const MoveList& moves, int count
     }
 }
 
+// History gravity: moves a history score by `delta` while pulling it toward
+// +-hist_max, so the tables never saturate. With |delta| <= hist_max and
+// |h| <= hist_max before, |h| <= hist_max after (rounding included), so
+// the clamp keeps every history score within 16 bits whatever the
+// parameters (it doesn't act at the tuned values).
+static void gravity(std::int16_t& h, int delta) {
+    delta = std::clamp(delta, -params::hist_max, params::hist_max);
+    h = static_cast<std::int16_t>(h + delta - h * std::abs(delta) / params::hist_max);
+}
+
 // A quiet move caused a beta cutoff: make it a killer at this ply, reward
 // it in the history and continuation history tables, and penalize the
-// quiet moves tried before it. The update pulls each score toward
-// +-hist_max rather than adding blindly ("history gravity"), so the tables
-// never saturate.
+// quiet moves tried before it. The updates use history
+// gravity.
 void Searcher::update_quiet_stats(const Position& pos, Move best, const Move* tried, int n_tried,
                                   int depth, int ply) {
     Move* killers = stack_[static_cast<std::size_t>(ply)].killers;
@@ -546,7 +571,6 @@ void Searcher::update_quiet_stats(const Position& pos, Move best, const Move* tr
                           params::cont_hist4_weight ? cont_table(ply, 4) : nullptr};
     const int bonus = std::min(params::hist_bonus_mult * depth * depth, params::hist_bonus_max);
     const int malus = std::min(params::hist_malus_mult * depth * depth, params::hist_malus_max);
-    auto gravity = [](int& h, int delta) { h += delta - h * std::abs(delta) / params::hist_max; };
     auto apply = [&](Move m, int delta) {
         gravity(hist[static_cast<std::size_t>(m.from())][static_cast<std::size_t>(m.to())], delta);
         const std::size_t reply = piece_to(pos.piece_at(m.from()), m.to());
@@ -558,14 +582,25 @@ void Searcher::update_quiet_stats(const Position& pos, Move best, const Move* tr
     for (int i = 0; i < n_tried; ++i) apply(tried[i], -malus);
 }
 
+void Searcher::reward_hash_move(const Position& pos, Move m, int depth, int ply, int pct) {
+    const int bonus =
+        std::min(params::hist_bonus_mult * depth * depth, params::hist_bonus_max) * pct / 100;
+    gravity(history_[static_cast<std::size_t>(pos.side_to_move())]
+                    [static_cast<std::size_t>(m.from())][static_cast<std::size_t>(m.to())],
+            bonus);
+    const std::size_t reply = piece_to(pos.piece_at(m.from()), m.to());
+    ContTable* cont[3] = {cont_table(ply, 1), cont_table(ply, 2),
+                          params::cont_hist4_weight ? cont_table(ply, 4) : nullptr};
+    for (ContTable* t : cont)
+        if (t) gravity((*t)[reply], bonus);
+    if (params::pawn_hist_weight) gravity(pawn_hist_[pawn_hist_index(pos, m)], bonus);
+}
+
 void Searcher::update_capture_stats(const Position& pos, Move best, const Move* tried,
                                     int n_tried, int depth) {
     const int bonus = std::min(params::capt_bonus_mult * depth * depth, params::capt_bonus_max);
     const int malus = std::min(params::capt_malus_mult * depth * depth, params::capt_malus_max);
-    auto apply = [&](Move m, int delta) {
-        int& h = capt_hist_[capture_index(pos, m)];
-        h += delta - h * std::abs(delta) / params::hist_max;
-    };
+    auto apply = [&](Move m, int delta) { gravity(capt_hist_[capture_index(pos, m)], delta); };
     if (best != Move{}) apply(best, bonus);
     for (int i = 0; i < n_tried; ++i) apply(tried[i], -malus);
 }
@@ -672,7 +707,8 @@ void Searcher::setup_tablebases(const Position& pos, bool use_dtz) {
         return;
 
     tb::RootRanking ranking;
-    if (!tb::rank_root(pos, ranking, use_dtz)) return;
+    // A mated or stalemated root ranks successfully with no moves.
+    if (!tb::rank_root(pos, ranking, use_dtz) || ranking.moves.empty()) return;
     int best = ranking.moves.front().rank;
     for (const auto& rm : ranking.moves) best = std::max(best, rm.rank);
     for (const auto& rm : ranking.moves)
@@ -686,6 +722,15 @@ void Searcher::setup_tablebases(const Position& pos, bool use_dtz) {
     if (ranking.dtz) tb_pieces_ = 0;
 }
 
+// Time to rank a tablebase root by DTZ? Not with little on the clock (nor
+// with none: node-limited searches rank by WDL).
+static bool rank_by_dtz(const Position& pos, const SearchLimits& limits) {
+    const long long budget = limits.infinite        ? -1
+                             : limits.movetime > 0  ? limits.movetime
+                                                    : limits.time[static_cast<int>(pos.side_to_move())];
+    return budget < 0 || budget >= params::tm_tb_dtz_min_ms;
+}
+
 void Searcher::begin_search(const Position& pos, const SearchLimits& limits) {
     // The clock runs from here: ranking a tablebase root by DTZ can take
     // tens of milliseconds (cold tables, a busy disk), and with threads
@@ -693,12 +738,43 @@ void Searcher::begin_search(const Position& pos, const SearchLimits& limits) {
     start_ = Clock::now();
     prune::init();  // the tables it fills are shared by all threads
     tt_.new_search();
-    // Time to rank a tablebase root by DTZ? Not with little on the clock.
-    const long long budget = limits.infinite        ? -1
-                             : limits.movetime > 0  ? limits.movetime
-                                                    : limits.time[static_cast<int>(pos.side_to_move())];
-    setup_tablebases(pos, budget < 0 || budget >= params::tm_tb_dtz_min_ms);
+    if (params::pure_search) {  // the evaluation alone: no tablebase verdicts
+        tb_pieces_ = 0;
+        root_moves_.clear();
+        root_tb_score_ = NO_EVAL;
+    } else {
+        setup_tablebases(pos, rank_by_dtz(pos, limits));
+    }
+    if (!limits.search_moves.empty()) {
+        std::vector<Move> keep;
+        for (const Move m : limits.search_moves)
+            if (root_moves_.empty() || std::find(root_moves_.begin(), root_moves_.end(), m) != root_moves_.end())
+                keep.push_back(m);
+        if (!keep.empty()) root_moves_ = std::move(keep);
+    }
     root_ready_ = true;
+}
+
+void Searcher::apply_frame_limits(const Position& pos, SearchLimits& limits) {
+    if (!params::frame_soft_nodes || !limits.nodes || limits.soft_nodes) return;
+    limits.soft_nodes = static_cast<std::uint64_t>(params::frame_soft_nodes);
+    limits.soft_scale = params::frame_soft_scale != 0;
+    if (!params::frame_drop_soft_nodes) return;
+    const bool in_check = pos.in_check(pos.side_to_move());
+    const int verdict = in_check ? NO_EVAL : tablebase_verdict(pos, limits);
+    if (in_check || (verdict != NO_EVAL && verdict != 0)) {
+        limits.soft_nodes = static_cast<std::uint64_t>(params::frame_drop_soft_nodes);
+        if (params::frame_drop_hard_nodes) limits.nodes = static_cast<std::uint64_t>(params::frame_drop_hard_nodes);
+    }
+}
+
+int Searcher::tablebase_verdict(const Position& pos, const SearchLimits& limits) {
+    if (params::pure_search) return NO_EVAL;
+    // The same ranking begin_search makes; it leaves the root's tablebase
+    // state as begin_search would, and the search's own begin_search
+    // makes it again.
+    setup_tablebases(pos, rank_by_dtz(pos, limits));
+    return root_tb_score_;
 }
 
 void Searcher::adopt_root(const Searcher& main) {
@@ -905,9 +981,11 @@ int Searcher::qsearch(Position& pos, int alpha, int beta, int ply) {
 
     const bool pv_node = beta - alpha > 1;
     const int alpha_orig = alpha;
+    const bool pure = params::pure_search;  // the evaluation alone (params.h)
 
     // Hash table. Any entry is deep enough to cut with, quiescence being
-    // depth 0; as in the main search, not at PV nodes.
+    // depth 0; as in the main search, not at PV nodes (nor in a pure search,
+    // where it only orders).
     Move tt_move{};
     int tt_eval = NO_EVAL;
     int tt_depth = -1;
@@ -921,7 +999,7 @@ int Searcher::qsearch(Position& pos, int alpha, int beta, int ply) {
         tt_score = score_from_tt(e.score, ply);
         tt_bound = e.bound();
         tt_pv = tt_pv || e.is_pv();
-        if (!pv_node) {
+        if (!pv_node && !pure) {
             if (tt_bound == TT::EXACT ||
                 (tt_bound == TT::LOWER && tt_score >= beta) ||
                 (tt_bound == TT::UPPER && tt_score <= alpha))
@@ -952,9 +1030,10 @@ int Searcher::qsearch(Position& pos, int alpha, int beta, int ply) {
         // Stand pat: the side to move can usually do at least as well as
         // the static evaluation by declining every capture.
         raw_eval = tt_eval != NO_EVAL ? tt_eval : eval_.evaluate(pos);
-        best = sharpen_eval(corrected_eval(pos, raw_eval, correction(pos)), tt_score, tt_bound);
+        best = pure ? raw_eval
+                    : sharpen_eval(corrected_eval(pos, raw_eval, correction(pos, -1)), tt_score, tt_bound);
         if (best >= beta) {
-            const int firm = fail_firm(best, beta, params::ff_stand_pat_pct);
+            const int firm = pure ? best : fail_firm(best, beta, params::ff_stand_pat_pct);
             count_feature(prune::FailFirm, firm != best);
             best = firm;
             store(best, Move{}, raw_eval);
@@ -998,10 +1077,10 @@ int Searcher::qsearch(Position& pos, int alpha, int beta, int ply) {
             // margin for what else the capture might gain, leaves the score
             // below alpha. Not for promotions, nor for checks, which can win
             // more than the piece.
-            if (m.promotion() == PieceType::None && std::abs(alpha) < DECISIVE_BOUND) {
+            if (!pure && m.promotion() == PieceType::None && std::abs(alpha) < DECISIVE_BOUND) {
                 const Piece victim = m.is_en_passant() ? WP : pos.piece_at(m.to());
                 const int optimistic =
-                    ctx.static_eval + ORDER_VALUE[victim % 6] + params::qs_delta_margin;
+                    ctx.static_eval + ORDER_VALUE[type_of(victim)] + params::qs_delta_margin;
                 count_tried(prune::QsDelta);
                 if (optimistic <= alpha) {
                     if (!have_check_info) {
@@ -1034,7 +1113,7 @@ int Searcher::qsearch(Position& pos, int alpha, int beta, int ply) {
                 if (sample_verify()) verify_pruned_move(pos, m, prune::QsSee, 1, alpha, ply);
                 continue;
             }
-        } else if (is_quiet(pos, m) && best > -DECISIVE_BOUND) {
+        } else if (!pure && is_quiet(pos, m) && best > -DECISIVE_BOUND) {
             // In check, once a line that isn't mated is known and enough
             // quiet evasions have been searched, the rest are skipped: the
             // captures that evade come first, and the point here is only to
@@ -1087,7 +1166,7 @@ int Searcher::probcut(Position& pos, int depth, int pc_beta, int eval, Move tt_m
         const Piece victim = m.is_en_passant() ? WP : pos.piece_at(m.to());
         moves[static_cast<std::size_t>(n)] = m;
         scores[static_cast<std::size_t>(n)] =
-            m == tt_move ? INT_MAX : victim == NO_PIECE ? 0 : ORDER_VALUE[victim % 6];
+            m == tt_move ? INT_MAX : victim == NO_PIECE ? 0 : ORDER_VALUE[type_of(victim)];
         ++n;
     }
 
@@ -1133,6 +1212,7 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
 
     const bool root = ply == 0;
     const bool pv_node = beta - alpha > 1;
+    const bool pure = params::pure_search;  // the evaluation alone (params.h)
     StackEntry& ss = stack_[static_cast<std::size_t>(ply)];
     const bool no_prune = std::exchange(ss.no_prune, false);
     const Move excluded = ss.excluded;  // set by a singular-extension probe
@@ -1144,7 +1224,7 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
     // Upcoming repetition: if one reversible move can bring back a position
     // from earlier in this line, a draw is at hand, so the node is worth at
     // least that to the side to move.
-    if (!root && params::rep_in_reach && alpha < 0) {
+    if (!root && params::rep_in_reach && !pure && alpha < 0) {
         const bool in_reach = repetition_in_reach(pos, ply);
         count_feature(prune::RepInReach, in_reach);
         if (in_reach) {
@@ -1189,11 +1269,19 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
         if (excluded != Move{}) {
             tt_score = 0;
             tt_bound = TT::NONE;
-        } else if (!pv_node && e.depth >= depth) {
+        } else if (!pv_node && !pure && e.depth >= depth) {
             if (tt_bound == TT::EXACT ||
                 (tt_bound == TT::LOWER && tt_score >= beta) ||
-                (tt_bound == TT::UPPER && tt_score <= alpha))
+                (tt_bound == TT::UPPER && tt_score <= alpha)) {
+                // A quiet hash move that fails high again: rewarded as if
+                // searched (params::tt_cut_hist_pct).
+                const bool rewarded = params::tt_cut_hist_pct && tt_score >= beta &&
+                                      tt_move != Move{} && pos.is_legal(tt_move) &&
+                                      is_quiet(pos, tt_move);
+                count_feature(prune::TtCutHist, rewarded);
+                if (rewarded) reward_hash_move(pos, tt_move, depth, ply, params::tt_cut_hist_pct);
                 return tt_score;
+            }
         }
     }
 
@@ -1201,7 +1289,7 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
     // fresh fifty-move count), with few enough pieces, the result is known.
     // It ends the search here when it settles the window; otherwise (a win
     // below beta at a PV node, say) the node is searched as usual.
-    if (tb_pieces_ && !root && excluded == Move{} && pos.halfmove_clock() == 0 &&
+    if (tb_pieces_ && !pure && !root && excluded == Move{} && pos.halfmove_clock() == 0 &&
         !pos.castling_rights()) {
         const int pieces = std::popcount(pos.occupied());
         if (pieces < tb_pieces_ || (pieces == tb_pieces_ && depth >= tb::probe_depth)) {
@@ -1232,11 +1320,24 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
     // the current one. static_eval (corrected) is the node's own estimate,
     // which `improving` and correction history compare against; `eval` may
     // be sharpened by the hash score, and is what pruning decides with.
+    // A pure search uses the raw eval as it is (it only orders moves there).
     const int raw_eval = in_check ? NO_EVAL : tt_eval != NO_EVAL ? tt_eval : eval_.evaluate(pos);
-    const int corr = in_check ? 0 : correction(pos);
-    ss.static_eval = in_check ? NO_EVAL : corrected_eval(pos, raw_eval, corr);
+    const int corr = in_check || pure ? 0 : correction(pos, ply);
+    ss.static_eval = in_check ? NO_EVAL : pure ? raw_eval : corrected_eval(pos, raw_eval, corr);
     const int static_eval = ss.static_eval;
-    const int eval = in_check ? NO_EVAL : sharpen_eval(static_eval, tt_score, tt_bound);
+    const int eval = in_check ? NO_EVAL : pure ? static_eval : sharpen_eval(static_eval, tt_score, tt_bound);
+
+    // Hindsight depth (see params.h): judge the parent's reduction of this
+    // node by what its move did to the static eval.
+    if (params::hindsight_red && !in_check && excluded == Move{} && ply >= 1) {
+        const StackEntry& prev = stack_[static_cast<std::size_t>(ply - 1)];
+        if (prev.reduction >= params::hindsight_red && prev.static_eval != NO_EVAL) {
+            const int cost = static_eval + prev.static_eval;
+            const int change = cost <= 0 ? 1 : cost > params::hindsight_margin && depth >= 2 ? -1 : 0;
+            count_feature(prune::Hindsight, change != 0);
+            depth += change;
+        }
+    }
 
     // Eval-change history: how much the opponent's last quiet move changed
     // the static eval, from its own side, is a hint about the move; it goes
@@ -1250,10 +1351,10 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
             const int delta = -(static_eval + prev.static_eval);
             const int bonus = std::clamp(delta * params::eval_hist_mult / 16,
                                          -params::eval_hist_malus_max, params::eval_hist_bonus_max);
-            int& h = history_[static_cast<std::size_t>(opposite(pos.side_to_move()))]
-                             [static_cast<std::size_t>(prev.move.from())]
-                             [static_cast<std::size_t>(prev.move.to())];
-            h += bonus - h * std::abs(bonus) / params::hist_max;
+            gravity(history_[static_cast<std::size_t>(opposite(pos.side_to_move()))]
+                            [static_cast<std::size_t>(prev.move.from())]
+                            [static_cast<std::size_t>(prev.move.to())],
+                    bonus);
             count_feature(prune::EvalHist, bonus != 0);
         }
     }
@@ -1281,7 +1382,7 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
     // Internal iterative reduction (see params.h). Decided here, applied
     // after node-level pruning, which works with the full depth.
     const bool probing = excluded != Move{};  // a singular-extension probe
-    const bool iir = !root && !probing && depth >= params::iir_min_depth && tt_move == Move{} &&
+    const bool iir = !root && !probing && !pure && depth >= params::iir_min_depth && tt_move == Move{} &&
                      (pv_node || cut_node);
     if (!root && !probing && depth >= params::iir_min_depth) count_feature(prune::IIR, iir);
 
@@ -1314,7 +1415,7 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
     // all that's asked is whether the node fails high or low, and a good
     // enough guess will do. Never in check, where the static eval means
     // little.
-    if (!pv_node && !in_check && !no_prune && !probing) {
+    if (!pv_node && !in_check && !no_prune && !probing && !pure) {
         // Alpha-side hash cut: a search a few plies shallower already put an
         // upper bound on this node well below alpha. Fail low without
         // searching (the mirror of ProbCut's hash-table test; see params.h).
@@ -1439,7 +1540,14 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
     }
 
     if (iir) {
-        depth -= params::iir_reduction;
+        // Never below one ply. The node is past the "depth <= 0 is
+        // quiescence" test, and the tunables' ranges overlap (IirMinDepth
+        // from 2, IirReduction to 3): with the minimum depth at or under the
+        // reduction a node went on at depth 0 or -1, storing that depth, and
+        // with FfMainDepth on the fail-firm blend below divided by depth + 1
+        // = 0 (found by FunHouse's tune, 2026-10-11; not reachable at the
+        // defaults, 8 and 2).
+        depth = std::max(depth - params::iir_reduction, 1);
         ctx.depth = depth;  // move-level pruning and LMR work with the reduced depth
     }
 
@@ -1448,6 +1556,7 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
     const ContTable* const cont4 = params::cont_hist4_weight ? cont_table(ply, 4) : nullptr;
     MovePicker picker(*this, pos, tt_move, ply, cont, cont4);
     int legal_moves = 0;
+    ss.child_cutoffs = 0;
     meter.reached_moves();
 
     const int alpha_orig = alpha;
@@ -1475,6 +1584,7 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
         if (root && !root_moves_.empty() &&
             std::find(root_moves_.begin(), root_moves_.end(), m) == root_moves_.end())
             continue;
+        if (root && m == avoid_root_) continue;  // avoid_at_root (gendata)
         // Position in the move order, counting quiet moves the picker dropped.
         // In a probe, the excluded move may be left out of it (after it).
         const int i = legal_moves++ + picker.dropped_before() - skipped_excluded;
@@ -1505,6 +1615,7 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
         ctx.move = m;
         ctx.move_index = i;
         ctx.alpha = alpha;
+        ctx.child_cutoffs = ss.child_cutoffs;
         ctx.quiet = quiet;
         ctx.killer = quiet && (m == ss.killers[0] || m == ss.killers[1]);
         ctx.history = quiet ? quiet_history(pos, m, cont) : 0;
@@ -1514,7 +1625,7 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
         if (quiet)
             count_feature(prune::QuietCheck,
                           params::quiet_check_bonus &&
-                              (check_info.checking_from[pos.piece_at(m.from()) % 6] & bit(m.to())));
+                              (check_info.checking_from[type_of(pos.piece_at(m.from()))] & bit(m.to())));
         // Static threats: only computed for LmrStaticThreat or a guide.
         if (quiet && !have_static_threats && (params::lmr_static_threat || prune::guide)) {
             static_threats = pos.threatened_by_lesser(pos.side_to_move());
@@ -1532,7 +1643,7 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
         // futility pruning and late move pruning (pruning them too lost 42
         // Elo, before the 2.0 tune and after it): a checking sacrifice is
         // exactly the quiet move that a bad static eval says to skip.
-        if (!root && !in_check && best > -DECISIVE_BOUND) {
+        if (!root && !in_check && !pure && best > -DECISIVE_BOUND) {
             // Underpromotions: a queen does at least as well but for
             // stalemate tricks and knight forks (checks are kept).
             if (params::underpromo_prune && m.promotion() != PieceType::None &&
@@ -1622,13 +1733,14 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
         // special: when it was expected to fail high anyway (its score is
         // at least beta, or this is a cut node), search it shallower.
         int extension = 0;
-        if (!root && !probing && m == tt_move && depth >= params::se_min_depth &&
+        if (!root && !probing && !pure && m == tt_move && depth >= params::se_min_depth &&
             ply < params::se_ply_mult * root_depth_ && ss.extensions < params::se_max_extensions &&
             tt_depth >= depth - params::se_tt_depth_margin &&
             (tt_bound == TT::LOWER || tt_bound == TT::EXACT) &&
             std::abs(tt_score) < DECISIVE_BOUND) {
             const int s_beta = tt_score - params::se_margin * depth / 16;
             const Move threat = ss.threat;  // the probe re-enters this ply
+            const int child_cutoffs = ss.child_cutoffs;
             const int threat_score = ss.threat_score;
             ss.excluded = m;
             const int v = negamax(pos, (depth - 1) * params::se_probe_depth_pct / 100, s_beta - 1,
@@ -1636,6 +1748,7 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
             ss.excluded = Move{};
             ss.threat = threat;
             ss.threat_score = threat_score;
+            ss.child_cutoffs = child_cutoffs;
             if (stopped_) return 0;
             if (v < s_beta)
                 extension = !pv_node && v < s_beta - params::se_double_margin &&
@@ -1655,7 +1768,7 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
         // A check that doesn't lose material is searched a ply deeper (not on
         // top of a singular extension, nor after a negative one; only singular
         // extensions count towards the per-path cap).
-        const int check_ext = any_check && see_at_least(pos, m, params::check_ext_see) ? 1 : 0;
+        const int check_ext = (!pure || params::pure_search == 2) && any_check && see_at_least(pos, m, params::check_ext_see) ? 1 : 0;
         if (any_check) count_feature(prune::CheckExt, check_ext > 0 && extension == 0);
 
         // A capture that loses material by static exchange (and neither
@@ -1675,7 +1788,6 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
         ss.quiet = quiet;
         ss.history = ctx.history;
         ss.move_index = i;
-        if (CONT_LOG_BUILD && cont_log_) ss.set_reduction(0);
         const std::uint64_t nodes_before = nodes_;
         pos.make_move(m, st, any_check);
         tt_.prefetch(tt_key(pos));
@@ -1699,7 +1811,7 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
             // searched shallower first, and at full depth only if the
             // reduced search says they beat alpha.
             int r = 0;
-            if (depth >= params::lmr_min_depth && !in_check &&
+            if (depth >= params::lmr_min_depth && !in_check && !pure &&
                 i >= params::lmr_min_moves + (pv_node ? 1 : 0) &&
                 (quiet ? !ctx.gives_check : losing_capture)) {
                 count_tried(prune::LMR);
@@ -1707,6 +1819,8 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
                 // At least one ply left to search (and no clamp with lo > hi
                 // if LmrMinDepth is tuned down to 1).
                 r = std::max(std::min(prune::lmr_reduction(ctx), new_depth - 1), 0);
+                count_feature(prune::LmrChildCut, params::lmr_child_cutoffs &&
+                                                      ctx.child_cutoffs >= params::lmr_child_cutoffs);
                 if (quiet && ctx.parent_quiet)
                     count_feature(prune::LmrParentHist,
                                   params::lmr_parent_hist &&
@@ -1717,9 +1831,9 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
                 count_fired(prune::LMR);
                 if (!quiet) count_fired(prune::LmrCapture);
                 ss.provisional = true;  // searched again at full depth if it fails low
-                if (CONT_LOG_BUILD && cont_log_) ss.set_reduction(r);
+                ss.reduction = r;
                 score = -negamax(pos, new_depth - r, -alpha - 1, -alpha, ply + 1, true);
-                if (CONT_LOG_BUILD && cont_log_) ss.set_reduction(0);
+                ss.reduction = 0;
                 if (score > alpha) {
                     if (cn) ++cn->researches;
                     if (!verify_depth_) {
@@ -1787,6 +1901,8 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
                 }
                 if (alpha >= beta) {
                     if (quiet) update_quiet_stats(pos, m, quiets_tried.data(), n_quiets, depth, ply);
+                    if (ply >= 1 && excluded == Move{})
+                        ++stack_[static_cast<std::size_t>(ply - 1)].child_cutoffs;
                     update_capture_stats(pos, is_capture(pos, m) ? m : Move{}, captures_tried.data(),
                                          n_captures, depth);
                     break;
@@ -1830,13 +1946,13 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
             const int bonus =
                 std::min(params::hist_bonus_mult * depth * depth, params::hist_bonus_max) * pct /
                 100;
-            auto gravity = [&](int& h) { h += bonus - h * bonus / params::hist_max; };
             const Color side = opposite(pos.side_to_move());
             gravity(history_[static_cast<std::size_t>(side)][static_cast<std::size_t>(
-                prev.move.from())][static_cast<std::size_t>(prev.move.to())]);
+                        prev.move.from())][static_cast<std::size_t>(prev.move.to())],
+                    bonus);
             const std::size_t reply = piece_to(prev.piece, prev.move.to());
             for (int back = 1; back <= 2; ++back)
-                if (ContTable* t = cont_table(ply - 1, back)) gravity((*t)[reply]);
+                if (ContTable* t = cont_table(ply - 1, back)) gravity((*t)[reply], bonus);
         }
     }
     // A node that fails low below a flagged parent keeps the flag when it
@@ -1868,7 +1984,7 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
         const bool scaled = params::corr_unscale_fifty && params::fifty_scale && clock > 0;
         if (!scaled || 2 * left >= params::fifty_scale) {
             if (scaled) target = best * params::fifty_scale / left;
-            update_correction(pos, depth, target - raw_eval);
+            update_correction(pos, ply, depth, target - raw_eval);
         }
     }
 
@@ -1878,7 +1994,7 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
     // what the search found; never at the root.
     if (bound == TT::LOWER && !root) {
         const int before = best;
-        if (params::ff_main_depth && std::abs(best) < DECISIVE_BOUND &&
+        if (params::ff_main_depth && !pure && std::abs(best) < DECISIVE_BOUND &&
             std::abs(beta) < DECISIVE_BOUND)
             best = (best * depth + beta) / (depth + 1);
         count_feature(prune::FailFirm, best != before);
@@ -1934,9 +2050,32 @@ Move Searcher::ponder_move(Position& pos, Move best) {
     pos.make_move(best, st);
     TT::Entry e;
     // A colliding entry could hold any move: only a legal one will do.
-    const Move reply = tt_.probe(pos.key(), e) && pos.is_legal(e.move) ? e.move : Move{};
+    const Move reply = tt_.probe(tt_key(pos), e) && pos.is_legal(e.move) ? e.move : Move{};  // stored under tt_key
     pos.unmake_move(best, st);
     return reply;
+}
+
+Searcher::RootEval Searcher::root_eval(const Position& pos) {
+    if (pos.in_check(pos.side_to_move())) return {NO_EVAL, NO_EVAL};
+    const int corr = correction(pos, 0);
+    const int raw = evaluate(pos);
+    const int static_eval = corrected_eval(pos, raw, corr);
+    return {static_eval, static_eval - raw};
+}
+
+int Searcher::quiescence(Position& pos, const std::vector<std::uint64_t>& history) {
+    nodes_ = 0;
+    node_limit_ = 0;
+    soft_ms_ = hard_ms_ = 0;
+    pondering_ = false;
+    stopped_ = false;
+    eval_.reset(pos);
+    for (auto& e : stack_) e = StackEntry{};
+    keys_ = history;
+    null_barrier_ = 0;
+    verify_depth_ = 0;
+    tb_pieces_ = 0;  // the score of the position's captures, not a tablebase verdict
+    return qsearch(pos, -INF, INF, 0);
 }
 
 Move Searcher::search(Position& pos, const SearchLimits& limits,
@@ -2062,7 +2201,7 @@ Move Searcher::search(Position& pos, const SearchLimits& limits,
         const int score_before = prev_score;
         prev_score = score;
         last_score_ = score;
-        iterations_.push_back({depth, nodes_, score});
+        iterations_.push_back({depth, nodes_, score, std::max(seldepth_, depth), best});
 
         if (verbose) report(depth, score, best != Move{} ? reported_line(pos, best, depth)
                                                          : principal_variation(pos, depth));
@@ -2094,9 +2233,12 @@ Move Searcher::search(Position& pos, const SearchLimits& limits,
         // by how settled the search looks (see params.h). A best move that
         // keeps changing, or a falling score, earns more time; one that has
         // held for several iterations, less; so does a best move that took
-        // most of the search's nodes.
+        // most of the search's nodes. With soft_scale, a soft node limit is
+        // scaled the same way (data generation: the nodes go where the
+        // position is unsettled).
         check_ponderhit();
-        if (soft_ms_) {
+        const bool scaled_nodes = limits.soft_nodes && limits.soft_scale;
+        if (soft_ms_ || scaled_nodes) {
             stability = best == prev_best ? stability + 1 : 0;
             prev_best = best;
             const int drop = depth > 1 ? std::max(score_before - score, 0) : 0;
@@ -2113,16 +2255,20 @@ Move Searcher::search(Position& pos, const SearchLimits& limits,
                       std::max(params::tm_nodes_base - params::tm_nodes_slope * frac / 100,
                                static_cast<long long>(params::tm_nodes_min)) /
                       100;
-                // Acted: the node share changed whether this iteration stops.
-                const long long elapsed = elapsed_ms();
-                auto stops = [&](long long p) {
-                    return elapsed >= std::min(limit_base_ms_ + soft_ms_ * p / 100, hard_ms_);
-                };
-                count_feature(prune::TmNodes, stops(pct) != stops(pct_before_nodes));
+                if (soft_ms_) {
+                    // Acted: the node share changed whether this iteration stops.
+                    const long long elapsed = elapsed_ms();
+                    auto stops = [&](long long p) {
+                        return elapsed >= std::min(limit_base_ms_ + soft_ms_ * p / 100, hard_ms_);
+                    };
+                    count_feature(prune::TmNodes, stops(pct) != stops(pct_before_nodes));
+                }
             }
-            const long long soft = std::min(limit_base_ms_ + soft_ms_ * pct / 100, hard_ms_);
-            if (elapsed_ms() >= soft) break;
+            if (soft_ms_ && elapsed_ms() >= std::min(limit_base_ms_ + soft_ms_ * pct / 100, hard_ms_)) break;
+            if (scaled_nodes && nodes_ >= limits.soft_nodes * static_cast<std::uint64_t>(pct) / 100) break;
         }
+        // Nodes: likewise past a soft node limit, unscaled without soft_scale.
+        if (limits.soft_nodes && !limits.soft_scale && nodes_ >= limits.soft_nodes) break;
         // A forced mate found within this depth can't get any shorter.
         if (score > MATE_BOUND && MATE - score <= depth) break;
     }

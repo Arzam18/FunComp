@@ -69,6 +69,9 @@ enum Feature {
     FailFirm,      // non-root fail highs (RFP, stand pat, ProbCut, main); acted: pulled toward beta
     EvalHist,      // eval-change history updates (only counted when on); acted: nonzero
     LmrParentHist, // reduced quiet moves after a quiet one; acted: histories of opposite sign
+    TtCutHist,     // non-PV hash cutoffs; acted: a quiet hash move failing high rewarded
+    LmrChildCut,   // LMR tries; acted: enough child cutoffs to reduce more
+    Hindsight,     // nodes reduced by the parent enough to judge; acted: depth changed
     FEATURE_COUNT
 };
 
@@ -80,6 +83,9 @@ inline constexpr const char* FEATURE_NAMES[FEATURE_COUNT] = {
     "fail-firm",
     "eval-hist",
     "lmr-parent-hist",
+    "tt-cut-hist",
+    "lmr-child-cut",
+    "hindsight",
 };
 
 struct Context {
@@ -101,6 +107,7 @@ struct Context {
     // when it was chosen (see params::lmr_parent_hist).
     bool parent_quiet = false;
     int parent_history = 0;
+    int child_cutoffs = 0;  // children of the node that failed high in their move loops
 
     // Move (move-level heuristics only).
     Move move{};
@@ -265,6 +272,8 @@ inline int lmr_reduction(const Context& c) {
     if (c.threatened)
         r += c.evades_threat ? -params::lmr_threat_evade : params::lmr_threat_ignore;
     if (c.escapes_threat) r -= params::lmr_static_threat;
+    if (params::lmr_child_cutoffs && c.child_cutoffs >= params::lmr_child_cutoffs)
+        r += params::lmr_child_cutoff_add;
     // Truncated, as the base table used to be: with whole-ply adjustments
     // this gives the old whole-ply base reductions.
     return detail::guided_reduction(LMR, c, r / LMR_SCALE);

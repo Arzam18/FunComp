@@ -97,7 +97,7 @@ Vector extract(const Position& pos) {
         const Move m = moves[static_cast<std::size_t>(i)];
         const Piece victim = m.is_en_passant() ? WP : pos.piece_at(m.to());
         if (victim != NO_PIECE && see_at_least(pos, m, 0))
-            best_capture = std::max(best_capture, SEE_VALUE[victim % 6]);
+            best_capture = std::max(best_capture, SEE_VALUE[type_of(victim)]);
     }
 
     const auto u = static_cast<std::size_t>(us), t = static_cast<std::size_t>(them);

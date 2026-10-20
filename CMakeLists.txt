@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(chess_engine VERSION 2.0 LANGUAGES C CXX)
+project(chess_engine VERSION 3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -24,11 +24,14 @@ if (LTO AND ipo_supported)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 endif()
 
-# Release builds for other machines: ARCH sets -march to a portable CPU
-# level, x86-64 (any 64-bit x86 CPU) or x86-64-v3 (AVX2, BMI2: Haswell,
-# Zen and later), so testers' CPUs don't hit instructions they lack. Empty
-# (the default) leaves it to the compiler. NATIVE overrides it.
-set(ARCH "" CACHE STRING "CPU level for -march: x86-64, x86-64-v3, or empty")
+# ARCH sets -march to a portable CPU level, so release builds don't use
+# instructions a tester's CPU lacks: x86-64-v2 (the default; POPCNT and
+# SSE4.2, every x86-64 CPU since about 2009) or x86-64-v3 (AVX2, BMI2:
+# Haswell, Zen and later). Baseline x86-64 has no popcount instruction:
+# GCC then calls a library routine for every bit count, 7% of a search's
+# instructions (about 10% of its time). Empty leaves it to the compiler;
+# NATIVE overrides it.
+set(ARCH "x86-64-v2" CACHE STRING "CPU level for -march: x86-64-v2, x86-64-v3, or empty")
 if (ARCH AND NOT NATIVE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-march=${ARCH})
 endif()
@@ -36,6 +39,21 @@ endif()
 option(NATIVE "Optimize for the build machine's CPU" OFF)
 if (NATIVE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-march=native)
+endif()
+
+# Profile-guided optimisation (GCC; 2026-10-08, for round 3's datagen):
+# PGO=GENERATE builds an instrumented engine whose runs write profiles
+# beside its object files; PGO=USE, configured in the same build directory
+# afterwards, rebuilds with them. It changes how the code is compiled, not
+# what it computes: the bench must come out the same.
+set(PGO "" CACHE STRING "Profile-guided optimisation: GENERATE, USE, or empty")
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+    if (PGO STREQUAL "GENERATE")
+        add_compile_options(-fprofile-generate)
+        add_link_options(-fprofile-generate)
+    elseif (PGO STREQUAL "USE")
+        add_compile_options(-fprofile-use -fprofile-correction -Wno-missing-profile)
+    endif()
 endif()
 
 # -DTUNE=ON advertises the search parameters in params.h as UCI options,
@@ -87,6 +105,7 @@ add_library(engine STATIC
     src/movegen.cpp
     src/eval.cpp
     src/initiative.cpp
+    src/nnue.cpp
     src/see.cpp
     src/pruning.cpp
     src/search.cpp
@@ -96,11 +115,35 @@ add_library(engine STATIC
     src/labels.cpp
     src/bingo.cpp
     src/cont_log.cpp
+    src/datagen.cpp
+    src/featstats.cpp
+    src/pair_features.cpp
+    src/pawn_features.cpp
+    src/square_features.cpp
     src/perft.cpp
     src/pgn.cpp
+    src/reservoir.cpp
 )
 target_include_directories(engine PUBLIC src)
 target_link_libraries(engine PUBLIC fathom)
+# The release network compiled into the binary (3.0 on; src/embedded_net.cpp): a .nnue file, the default
+# nets/funcomp-3.0.nnue when the tree has it (the public release's); empty: none (EvalFile then loads a network,
+# the hand-written evaluation otherwise).
+set(EMBED_NET_DEFAULT "")
+if (EXISTS ${CMAKE_SOURCE_DIR}/nets/funcomp-3.0.nnue)
+    set(EMBED_NET_DEFAULT ${CMAKE_SOURCE_DIR}/nets/funcomp-3.0.nnue)
+endif()
+set(EMBED_NET "${EMBED_NET_DEFAULT}" CACHE FILEPATH "A network compiled into the binary (empty: none)")
+target_sources(engine PRIVATE src/embedded_net.cpp)
+if (EMBED_NET)
+    if (NOT EXISTS ${EMBED_NET})
+        message(FATAL_ERROR "EMBED_NET: no file ${EMBED_NET}")
+    endif()
+    set_source_files_properties(src/embedded_net.cpp PROPERTIES
+        COMPILE_DEFINITIONS "FUNCOMP_EMBED_NET_PATH=\"${EMBED_NET}\""
+        OBJECT_DEPENDS ${EMBED_NET})
+    message(STATUS "Embedded network: ${EMBED_NET}")
+endif()
 engine_warnings(engine)
 # The source tree's git commit, for data files to record what made them
 # (labels' .params): regenerated at every build, rewritten only on change.
@@ -125,6 +168,15 @@ if (TUNE)
     target_compile_definitions(chess PRIVATE TUNE)
 endif()
 engine_warnings(chess)
+# Windows: version information and an application manifest in the executable
+# (cmake/win/funcomp.rc.in): binaries without them are more often taken for
+# malware by Defender's heuristics.
+if (WIN32)
+    enable_language(RC)
+    set(FUNCOMP_MANIFEST ${CMAKE_SOURCE_DIR}/cmake/win/funcomp.manifest)
+    configure_file(cmake/win/funcomp.rc.in ${CMAKE_BINARY_DIR}/generated/funcomp.rc @ONLY)
+    target_sources(chess PRIVATE ${CMAKE_BINARY_DIR}/generated/funcomp.rc)
+endif()
 
 enable_testing()
 
@@ -132,6 +184,23 @@ add_executable(perft_tests tests/perft_tests.cpp)
 target_link_libraries(perft_tests PRIVATE engine)
 engine_warnings(perft_tests)
 add_test(NAME perft COMMAND perft_tests)
+
+# The bench node count: any change to it is a change to the search, made
+# on purpose (and stated in the commit) or not at all. Update it with such
+# a change.
+# 1119452 since the release merge (2026-10-19): the 5c values and tune-5c's
+# features (round3-engine), equal to round 3's datagen engine c4a22c3.
+# 1197522 since the 3.0 fine tune's values (2026-10-20).
+set(BENCH_NODES 1197522)
+# With the release network embedded (nets/funcomp-3.0.nnue), bench searches with it: its own count. Another
+# network embedded gives another count (set BENCH_NODES_EMBEDDED for it). 1187868: 3.0's network
+# (t1-r123-1024k7-sb120) at the 3.0 fine tune's values, equal to the same network from a file.
+set(BENCH_NODES_EMBEDDED 1187868 CACHE STRING "The bench count with the embedded network")
+if (EMBED_NET)
+    set(BENCH_NODES ${BENCH_NODES_EMBEDDED})
+endif()
+add_test(NAME bench COMMAND chess bench)
+set_tests_properties(bench PROPERTIES PASS_REGULAR_EXPRESSION "${BENCH_NODES} nodes ")
 
 add_executable(search_tests tests/search_tests.cpp)
 target_link_libraries(search_tests PRIVATE engine)

@@ -119,6 +119,11 @@ inline constexpr int MAX_THREADS = 256;
 class ThreadPool {
 public:
     explicit ThreadPool(std::size_t hash_mb = 64);
+    // Helpers may still be stopping after search() returns: they must finish
+    // before their positions (helper_pos_) and searchers go.
+    ~ThreadPool() { wait_helpers(); }
+    ThreadPool(const ThreadPool&) = delete;
+    ThreadPool& operator=(const ThreadPool&) = delete;
 
     // Call only while no search runs.
     void set_threads(int n);
