@@ -73,7 +73,7 @@ jobs:
           grep -E 'ANDROID_ABI:|CMAKE_ANDROID_ARCH_ABI:|ARCH:' \
             build-android/CMakeCache.txt || true
 
-          if grep -R -- '-march=x86-64' build-android/build.ninja; then
+          if grep -n -- '-march=x86-64' build-android/build.ninja; then
             echo "::error::An x86 architecture flag remains in the build."
             exit 1
           fi
@@ -124,8 +124,8 @@ jobs:
             exit 1
           fi
 
-          echo "Running engine benchmark..."
-          build-android/chess bench
+          echo "Android ARM64 binary verified."
+          echo "Skipping benchmark execution on Ubuntu because this is an Android executable."
 
       - name: Package Android binary
         if: success()
