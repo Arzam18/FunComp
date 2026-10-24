@@ -25,32 +25,24 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install CMake and Ninja
+      - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build
+          sudo apt-get install -y cmake ninja-build zip file
 
       - name: Configure Android NDK
         shell: bash
         run: |
+          set -e
+
           if [ -z "${ANDROID_NDK_LATEST_HOME:-}" ]; then
-            echo "::error::Android NDK environment variable is missing."
+            echo "::error::Android NDK was not found."
             exit 1
           fi
 
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
 
           test -f "$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake"
-
-      - name: Check embedded network
-        shell: bash
-        run: |
-          if [ -f nets/funcomp-3.0.nnue ]; then
-            echo "FunComp NNUE network found."
-          else
-            echo "::warning::nets/funcomp-3.0.nnue was not found."
-            echo "Check the network filename in the repository."
-          fi
 
       - name: Configure ARM64 build
         shell: bash
@@ -60,20 +52,37 @@ jobs:
           cmake -S . -B build-android \
             -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_SYSTEM_NAME=Android \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
             -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
-            -DCMAKE_ANDROID_API=24 \
+            -DCMAKE_SYSTEM_NAME=Android \
+            -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_STANDARD=23 \
+            -DARCH:STRING= \
             -DNATIVE=OFF \
             -DLTO=ON \
-            -DEMBED_NET="$PWD/nets/funcomp-3.0.nnue" \
-            -DCMAKE_C_FLAGS="-O3" \
-            -DCMAKE_CXX_FLAGS="-O3 -march=armv8-a+simd" \
+            -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG" \
+            -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG" \
             2>&1 | tee configure.log
 
+      - name: Verify target architecture
+        shell: bash
+        run: |
+          set -e
+
+          grep -E 'ANDROID_ABI:|CMAKE_ANDROID_ARCH_ABI:|ARCH:' \
+            build-android/CMakeCache.txt || true
+
+          if grep -R -- '-march=x86-64' build-android/build.ninja; then
+            echo "::error::An x86 architecture flag remains in the build."
+            exit 1
+          fi
+
+          echo "Checking compiler target..."
+          grep -m 3 -E -- '--target=aarch64|--target=arm64' \
+            build-android/build.ninja || true
+
       - name: Build engine and capture errors
-        id: build_engine
         shell: bash
         run: |
           set +e
@@ -90,38 +99,33 @@ jobs:
           fi
 
           echo "::error::FunComp Android compilation failed."
-          echo ""
-          echo "========== COMPILER AND LINKER ERRORS =========="
+          echo "========== ERRORS =========="
 
           grep -n -i -B 4 -A 8 -E \
             'error:|fatal error:|undefined reference|undefined symbol|ld\.lld:|FAILED:|CMake Error|No rule to make target|ninja: build stopped|cannot find|not found' \
-            build.log | head -n 240 || true
+            build.log | head -n 200 || true
 
-          echo ""
-          echo "========== LAST 80 BUILD LOG LINES =========="
-
-          tail -n 80 build.log
+          echo "========== LAST 50 LINES =========="
+          tail -n 50 build.log
 
           exit "$result"
 
-      - name: Verify Android binary
+      - name: Verify engine binary
         if: success()
         shell: bash
         run: |
           set -e
 
-          echo "Searching for generated executables..."
+          test -f build-android/chess
+          file build-android/chess
 
-          find build-android -type f -executable \
-            -exec file {} \; | tee binaries.txt
-
-          if [ ! -f build-android/chess ]; then
-            echo "::error::Expected binary build-android/chess was not found."
-            echo "Check binaries.txt and the CMake target names."
+          if ! file build-android/chess | grep -q 'ARM aarch64'; then
+            echo "::error::The generated executable is not ARM64."
             exit 1
           fi
 
-          file build-android/chess
+          echo "Running engine benchmark..."
+          build-android/chess bench
 
       - name: Package Android binary
         if: success()
@@ -140,7 +144,7 @@ jobs:
           zip funcomp-android-arm64.zip \
             funcomp-android-arm64 SHA256SUMS.txt
 
-      - name: Upload Android build
+      - name: Upload Android binary
         if: success()
         uses: actions/upload-artifact@v4
         with:
@@ -159,7 +163,8 @@ jobs:
           path: |
             configure.log
             build.log
-            binaries.txt
+            build-android/CMakeCache.txt
+            build-android/build.ninja
           if-no-files-found: ignore
 
       - name: Publish GitHub release
