@@ -31,21 +31,32 @@ jobs:
           sudo apt-get install -y cmake ninja-build
 
       - name: Configure Android NDK
+        shell: bash
         run: |
+          if [ -z "${ANDROID_NDK_LATEST_HOME:-}" ]; then
+            echo "::error::Android NDK environment variable is missing."
+            exit 1
+          fi
+
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
-          echo "NDK toolchain:"
+
           test -f "$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake"
 
       - name: Check embedded network
+        shell: bash
         run: |
           if [ -f nets/funcomp-3.0.nnue ]; then
             echo "FunComp NNUE network found."
           else
-            echo "::warning::nets/funcomp-3.0.nnue not found. The engine will build without an embedded network."
+            echo "::warning::nets/funcomp-3.0.nnue was not found."
+            echo "Check the network filename in the repository."
           fi
 
       - name: Configure ARM64 build
+        shell: bash
         run: |
+          set -o pipefail
+
           cmake -S . -B build-android \
             -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
@@ -54,32 +65,83 @@ jobs:
             -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
             -DCMAKE_ANDROID_API=24 \
             -DCMAKE_CXX_STANDARD=23 \
-            -DARCH= \
             -DNATIVE=OFF \
             -DLTO=ON \
             -DEMBED_NET="$PWD/nets/funcomp-3.0.nnue" \
             -DCMAKE_C_FLAGS="-O3" \
-            -DCMAKE_CXX_FLAGS="-O3 -march=armv8-a+simd"
+            -DCMAKE_CXX_FLAGS="-O3 -march=armv8-a+simd" \
+            2>&1 | tee configure.log
 
-      - name: Build engine
+      - name: Build engine and capture errors
+        id: build_engine
+        shell: bash
         run: |
-          cmake --build build-android --parallel 2
+          set +e
 
-      - name: Verify executable
+          cmake --build build-android --parallel 2 \
+            > build.log 2>&1
+
+          result=$?
+
+          if [ "$result" -eq 0 ]; then
+            echo "Build succeeded."
+            tail -n 30 build.log
+            exit 0
+          fi
+
+          echo "::error::FunComp Android compilation failed."
+          echo ""
+          echo "========== COMPILER AND LINKER ERRORS =========="
+
+          grep -n -i -B 4 -A 8 -E \
+            'error:|fatal error:|undefined reference|undefined symbol|ld\.lld:|FAILED:|CMake Error|No rule to make target|ninja: build stopped|cannot find|not found' \
+            build.log | head -n 240 || true
+
+          echo ""
+          echo "========== LAST 80 BUILD LOG LINES =========="
+
+          tail -n 80 build.log
+
+          exit "$result"
+
+      - name: Verify Android binary
+        if: success()
+        shell: bash
         run: |
-          test -x build-android/chess
+          set -e
+
+          echo "Searching for generated executables..."
+
+          find build-android -type f -executable \
+            -exec file {} \; | tee binaries.txt
+
+          if [ ! -f build-android/chess ]; then
+            echo "::error::Expected binary build-android/chess was not found."
+            echo "Check binaries.txt and the CMake target names."
+            exit 1
+          fi
+
           file build-android/chess
-          build-android/chess bench
 
       - name: Package Android binary
+        if: success()
+        shell: bash
         run: |
-          mkdir -p release
-          cp build-android/chess release/funcomp-android-arm64
-          cd release
-          sha256sum funcomp-android-arm64 > SHA256SUMS.txt
-          zip funcomp-android-arm64.zip funcomp-android-arm64 SHA256SUMS.txt
+          set -e
 
-      - name: Upload build artifacts
+          mkdir -p release
+
+          cp build-android/chess release/funcomp-android-arm64
+
+          cd release
+
+          sha256sum funcomp-android-arm64 > SHA256SUMS.txt
+
+          zip funcomp-android-arm64.zip \
+            funcomp-android-arm64 SHA256SUMS.txt
+
+      - name: Upload Android build
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: FunComp-Android-ARM64
@@ -89,8 +151,19 @@ jobs:
             release/SHA256SUMS.txt
           if-no-files-found: error
 
-      - name: Publish release
-        if: github.event_name == 'workflow_dispatch'
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FunComp-build-diagnostics
+          path: |
+            configure.log
+            build.log
+            binaries.txt
+          if-no-files-found: ignore
+
+      - name: Publish GitHub release
+        if: success() && github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: android-build-${{ github.run_number }}
