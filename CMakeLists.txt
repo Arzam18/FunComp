@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(chess_engine VERSION 3.0 LANGUAGES C CXX)
+project(chess_engine VERSION 3.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -30,8 +30,16 @@ endif()
 # Haswell, Zen and later). Baseline x86-64 has no popcount instruction:
 # GCC then calls a library routine for every bit count, 7% of a search's
 # instructions (about 10% of its time). Empty leaves it to the compiler;
-# NATIVE overrides it.
-set(ARCH "x86-64-v2" CACHE STRING "CPU level for -march: x86-64-v2, x86-64-v3, or empty")
+# NATIVE overrides it. On 64-bit ARM (Android's arm64-v8a, Linux aarch64)
+# the default is armv8-a, whose NEON every such CPU has; armv8.2-a+dotprod
+# adds the int8 dot product (SDOT), in phones since about 2018.
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+    set(ARCH_DEFAULT "armv8-a")
+else()
+    set(ARCH_DEFAULT "x86-64-v2")
+endif()
+set(ARCH "${ARCH_DEFAULT}" CACHE STRING
+    "CPU level for -march: x86-64-v2, x86-64-v3, armv8-a, armv8.2-a+dotprod, or empty")
 if (ARCH AND NOT NATIVE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-march=${ARCH})
 endif()
@@ -59,10 +67,20 @@ endif()
 # -DTUNE=ON advertises the search parameters in params.h as UCI options,
 # for automated tuning (SPSA). Normal builds leave them out of the GUI.
 option(TUNE "Expose search parameters as UCI options" OFF)
-# Continuation logging (cont_log.h, the genconlog command): compiled in only
-# with CONT_LOG, since even switched off its hooks cost the search about 2%
-# nps.
-option(CONT_LOG "Compile in continuation logging (genconlog)" OFF)
+# FROZEN_PARAMS compiles the search parameters as constants in the engine
+# (params.h): the same search, 2.3-3.9% faster on one thread (results.md,
+# "Frozen parameters"). For release and datagen builds; a TUNE build keeps
+# them variables, and so do the tests, which build their own copy of the
+# engine library. Only NnueScale stays settable in a frozen engine.
+option(FROZEN_PARAMS "Compile the search parameters as constants (off with TUNE)" ON)
+if (TUNE)
+    set(FROZEN_PARAMS OFF)
+endif()
+# Continuation logging (cont_log.h, the genconlog command) and tree sampling
+# (tree_sample.h, the treesample command): compiled in only with CONT_LOG,
+# since even switched off their hooks cost the search (the log's about 2%
+# nps).
+option(CONT_LOG "Compile in continuation logging and tree sampling (genconlog, treesample)" OFF)
 
 function(engine_warnings target)
     if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -79,6 +97,11 @@ function(engine_warnings target)
         # the search thread included, instead of MinGW's 2 MB: deep
         # searches recurse far, singular-extension probes on top.
         target_link_options(${target} PRIVATE -Wl,--stack,16777216)
+    elseif (ANDROID AND type STREQUAL "EXECUTABLE")
+        # Android: one static executable (the NDK's libc and libc++ linked
+        # in), so a chess app can run it from its own folder on any
+        # Android 7 or later (API 24), whatever the device's libraries.
+        target_link_options(${target} PRIVATE -static)
     elseif (MSVC AND type STREQUAL "EXECUTABLE")
         # The same for MSVC (default 1 MB). POSIX builds size the search
         # thread's stack when they create it (Worker in uci.cpp).
@@ -98,8 +121,10 @@ target_compile_definitions(fathom PUBLIC TB_NO_HELPER_API)
 target_link_libraries(fathom PUBLIC Threads::Threads)
 set_target_properties(fathom PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
 
-# Everything but the UCI front end, shared by the engine and the tests.
-add_library(engine STATIC
+# Everything but the UCI front end, shared by the engine and the tests. With
+# FROZEN_PARAMS the engine links a second copy, engine_frozen, with the
+# parameters as constants; the tests keep `engine`, whose parameters they set.
+set(ENGINE_SOURCES
     src/position.cpp
     src/attacks.cpp
     src/movegen.cpp
@@ -124,17 +149,15 @@ add_library(engine STATIC
     src/pgn.cpp
     src/reservoir.cpp
 )
-target_include_directories(engine PUBLIC src)
-target_link_libraries(engine PUBLIC fathom)
 # The release network compiled into the binary (3.0 on; src/embedded_net.cpp): a .nnue file, the default
-# nets/funcomp-3.0.nnue when the tree has it (the public release's); empty: none (EvalFile then loads a network,
+# nets/funcomp-3.1.nnue when the tree has it (the public release's); empty: none (EvalFile then loads a network,
 # the hand-written evaluation otherwise).
 set(EMBED_NET_DEFAULT "")
-if (EXISTS ${CMAKE_SOURCE_DIR}/nets/funcomp-3.0.nnue)
-    set(EMBED_NET_DEFAULT ${CMAKE_SOURCE_DIR}/nets/funcomp-3.0.nnue)
+if (EXISTS ${CMAKE_SOURCE_DIR}/nets/funcomp-3.1.nnue)
+    set(EMBED_NET_DEFAULT ${CMAKE_SOURCE_DIR}/nets/funcomp-3.1.nnue)
 endif()
 set(EMBED_NET "${EMBED_NET_DEFAULT}" CACHE FILEPATH "A network compiled into the binary (empty: none)")
-target_sources(engine PRIVATE src/embedded_net.cpp)
+list(APPEND ENGINE_SOURCES src/embedded_net.cpp)
 if (EMBED_NET)
     if (NOT EXISTS ${EMBED_NET})
         message(FATAL_ERROR "EMBED_NET: no file ${EMBED_NET}")
@@ -144,17 +167,31 @@ if (EMBED_NET)
         OBJECT_DEPENDS ${EMBED_NET})
     message(STATUS "Embedded network: ${EMBED_NET}")
 endif()
-engine_warnings(engine)
 # The source tree's git commit, for data files to record what made them
 # (labels' .params): regenerated at every build, rewritten only on change.
 add_custom_target(git_hash ALL
     COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${CMAKE_BINARY_DIR}/generated/git_hash.h
             -P ${CMAKE_SOURCE_DIR}/cmake/git_hash.cmake
     BYPRODUCTS ${CMAKE_BINARY_DIR}/generated/git_hash.h)
-add_dependencies(engine git_hash)
-target_include_directories(engine PRIVATE ${CMAKE_BINARY_DIR}/generated)
-if (CONT_LOG)
-    target_compile_definitions(engine PUBLIC CONT_LOG)
+function(engine_library name)
+    add_library(${name} STATIC ${ENGINE_SOURCES})
+    target_include_directories(${name} PUBLIC src)
+    target_link_libraries(${name} PUBLIC fathom)
+    engine_warnings(${name})
+    add_dependencies(${name} git_hash)
+    target_include_directories(${name} PRIVATE ${CMAKE_BINARY_DIR}/generated)
+    if (CONT_LOG)
+        target_compile_definitions(${name} PUBLIC CONT_LOG)
+    endif()
+endfunction()
+engine_library(engine)
+if (FROZEN_PARAMS)
+    engine_library(engine_frozen)
+    target_compile_definitions(engine_frozen PUBLIC FUNCOMP_FROZEN_PARAMS)
+    set(CHESS_ENGINE_LIB engine_frozen)
+    message(STATUS "Frozen parameters: the engine compiles them as constants")
+else()
+    set(CHESS_ENGINE_LIB engine)
 endif()
 
 add_executable(chess
@@ -162,8 +199,9 @@ add_executable(chess
     src/uci.cpp
     src/bench.cpp
     src/telemetry.cpp
+    src/tree_sample.cpp
 )
-target_link_libraries(chess PRIVATE engine)
+target_link_libraries(chess PRIVATE ${CHESS_ENGINE_LIB})
 if (TUNE)
     target_compile_definitions(chess PRIVATE TUNE)
 endif()
@@ -191,21 +229,53 @@ add_test(NAME perft COMMAND perft_tests)
 # 1119452 since the release merge (2026-10-19): the 5c values and tune-5c's
 # features (round3-engine), equal to round 3's datagen engine c4a22c3.
 # 1197522 since the 3.0 fine tune's values (2026-10-20).
-set(BENCH_NODES 1197522)
-# With the release network embedded (nets/funcomp-3.0.nnue), bench searches with it: its own count. Another
-# network embedded gives another count (set BENCH_NODES_EMBEDDED for it). 1187868: 3.0's network
-# (t1-r123-1024k7-sb120) at the 3.0 fine tune's values, equal to the same network from a file.
-set(BENCH_NODES_EMBEDDED 1187868 CACHE STRING "The bench count with the embedded network")
-if (EMBED_NET)
+# 1016380 since 3.1's focused tune's values (2026-10-29).
+set(BENCH_NODES 1016380)
+# With the release network embedded (nets/funcomp-3.1.nnue), bench searches with it: its own count. Another
+# network embedded gives another count (set BENCH_NODES_EMBEDDED for it). 1031103 and 1094101: 3.1's network
+# (t160-l-o, layered) at 3.1's focused tune's values, the SIMD count equal to the same network from a file
+# (3.0's network at the 3.0 fine tune's values: 1187868 on both paths).
+# A multi-layer network has a count for each of the two float paths (src/nnue.cpp, the layers after the
+# accumulators): AVX2 with FMA, or 64-bit ARM's NEON, which computes what AVX2 does (x86-64-v3, v4, Android), and
+# the plain C++ fallback (x86-64, x86-64-v2), which runs layer2 in float where the others run it in int8 and rounds
+# without fused multiply-adds: BENCH_NODES_EMBEDDED_PLAIN. A flat network: the same count on both (the author,
+# 2026-10-28: a count for each build, not the fallback made to round alike).
+set(BENCH_NODES_EMBEDDED 1031103 CACHE STRING
+    "The bench count with the embedded network (x86-64-v3, v4, Android; the others: BENCH_NODES_EMBEDDED_PLAIN)")
+set(BENCH_NODES_EMBEDDED_PLAIN 1094101 CACHE STRING
+    "The bench count with the embedded network, builds whose float layers are plain C++ (x86-64, x86-64-v2)")
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_FLAGS "")
+if (NATIVE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set(CMAKE_REQUIRED_FLAGS "-march=native")
+elseif (ARCH AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set(CMAKE_REQUIRED_FLAGS "-march=${ARCH}")
+endif()
+unset(FUNCOMP_SIMD_FLOAT CACHE)  # checked again at every configure: ARCH or NATIVE may have changed
+check_cxx_source_compiles("
+#if !((defined(__AVX2__) && defined(__FMA__)) || (defined(__ARM_NEON) && defined(__aarch64__)))
+#error the plain float layers
+#endif
+int main() { return 0; }" FUNCOMP_SIMD_FLOAT)
+unset(CMAKE_REQUIRED_FLAGS)
+if (EMBED_NET AND FUNCOMP_SIMD_FLOAT)
     set(BENCH_NODES ${BENCH_NODES_EMBEDDED})
+    message(STATUS "Float layers: SIMD, bench ${BENCH_NODES} (BENCH_NODES_EMBEDDED)")
+elseif (EMBED_NET)
+    set(BENCH_NODES ${BENCH_NODES_EMBEDDED_PLAIN})
+    message(STATUS "Float layers: plain C++, bench ${BENCH_NODES} (BENCH_NODES_EMBEDDED_PLAIN)")
 endif()
 add_test(NAME bench COMMAND chess bench)
 set_tests_properties(bench PROPERTIES PASS_REGULAR_EXPRESSION "${BENCH_NODES} nodes ")
 
-add_executable(search_tests tests/search_tests.cpp)
+add_executable(search_tests tests/search_tests.cpp src/bench.cpp)
 target_link_libraries(search_tests PRIVATE engine)
 engine_warnings(search_tests)
 add_test(NAME search COMMAND search_tests)
+# The same bench from the tests' copy of the engine, whose parameters are
+# variables: with FROZEN_PARAMS, the frozen and variable forms must agree.
+add_test(NAME bench_variable COMMAND search_tests bench)
+set_tests_properties(bench_variable PROPERTIES PASS_REGULAR_EXPRESSION "${BENCH_NODES} nodes ")
 # A directory with the 3-4-5-piece Syzygy tables turns on the tablebase
 # tests that need them (about 1 GB, so not required).
 set(SYZYGY_PATH "" CACHE PATH "Syzygy tables for the tests (optional)")

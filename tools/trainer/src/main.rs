@@ -1,4 +1,6 @@
 // FunComp's network trainer, on bullet (github.com/jw1912/bullet, MIT).
+// Its graphs follow bullet's examples (examples/simple.rs, progression/):
+// bullet's licence and copyright notice are in tools/trainer/LICENSE-bullet.
 //
 // Networks: (768 x KB -> HIDDEN) x 2 -> OB, the piece-square inputs seen
 // from each side (KB king buckets of them, chosen by that side's king
@@ -16,7 +18,7 @@
 //     [--save-rate 10] [--threads 4] [--out checkpoints]
 //     [--buckets flat|seven|seven-unmirrored|ten] [--output-buckets 1|8]
 //     [--pawns 1] [--knight-pairs 1] [--slider-pairs 1] [--slider-pawn 1]
-//     [--threats 1] [--attacked 1] [--least-attacker 1] [--king-zone 1]
+//     [--attacked 1] [--least-attacker 1] [--king-zone 1] (--threats is retired)
 //     [--connected-pairs 1] [--pawn-pieces 1] [--pawn-spans 1] [--control-counts 1]
 //     [--line-control 1] [--mobility 1] [--passers 1] (passed-pawn quality)
 //     [--output-endgame 1] (three output buckets by endgame type after the others)
@@ -38,6 +40,13 @@
 //     [--freeze-base 1] (with --init: the base held fixed, only the additions train:
 //     feature rows, king-block corrections, new output buckets; warm.rs)
 //     [--train-output 1] (with --freeze-base: the output layer trains too)
+//     [--resume <checkpoint dir>] [--start-superbatch N] (a run continued from its checkpoint: the weights and
+//     the optimiser's moments as saved; with N the checkpoint's superbatch + 1 the lr schedule goes on where it
+//     was; the data stream starts again from its seed; ROADMAP, "Dead layer1 neurons")
+//     [--stream 1] (the streaming shuffle, stream.rs: --data names unshuffled files or folders of them, each
+//     optionally <path>@<weight>, read in random chunks through a shuffled buffer; no joined or shuffled copy)
+//     [--shuffle-mb 2048] [--chunk 65536] [--seed 1] (its buffer, chunk size in positions and seed)
+//     [--stream-check N] (N positions through the stream against a plain read, 0 one pass; no training)
 //
 // With the defaults (flat, one output bucket) the network is bullet's bare
 // format, as the first networks were. Otherwise king buckets train with a
@@ -55,6 +64,7 @@ mod kingstate;
 mod pairs;
 mod pawns;
 mod squares;
+mod stream;
 mod warm;
 
 use bullet_lib::{
@@ -99,7 +109,6 @@ struct Args {
     knight_pairs: bool,
     slider_pairs: bool,
     slider_pawn: bool,
-    threats: bool,
     attacked: bool,
     least_attacker: bool,
     king_zone: bool,
@@ -128,10 +137,18 @@ struct Args {
     init_only: bool,
     freeze_base: bool,
     train_output: bool,
+    resume: Option<String>,
+    start_superbatch: usize,
     // After training: the trained net's raw output (before the sigmoid; times
     // the training scale, centipawns) for each FEN of this file, one a line:
     // the engine-against-trainer check (tools/nnue/check-nets.sh).
     eval_fens: Option<String>,
+    // The streaming shuffle (stream.rs).
+    stream: bool,
+    shuffle_mb: usize,
+    chunk: usize,
+    seed: u64,
+    stream_check: Option<u64>,
 }
 
 impl Args {
@@ -141,7 +158,6 @@ impl Args {
             || self.knight_pairs
             || self.slider_pairs
             || self.slider_pawn
-            || self.threats
             || self.attacked
             || self.least_attacker
             || self.king_zone
@@ -164,7 +180,6 @@ fn extras<B>(args: &Args, base: B, mirrored: bool, factorised: bool) -> pawns::W
         knights: args.knight_pairs,
         sliders: args.slider_pairs,
         slider_pawns: args.slider_pawn,
-        threats: args.threats,
         attacked: args.attacked,
         least_attacker: args.least_attacker,
         king_zone: args.king_zone,
@@ -202,7 +217,6 @@ fn parse_args() -> Args {
         knight_pairs: false,
         slider_pairs: false,
         slider_pawn: false,
-        threats: false,
         attacked: false,
         least_attacker: false,
         king_zone: false,
@@ -230,7 +244,14 @@ fn parse_args() -> Args {
         init_only: false,
         freeze_base: false,
         train_output: false,
+        resume: None,
+        start_superbatch: 1,
         eval_fens: None,
+        stream: false,
+        shuffle_mb: 2048,
+        chunk: 65_536,
+        seed: 1,
+        stream_check: None,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -258,7 +279,7 @@ fn parse_args() -> Args {
             "--knight-pairs" => a.knight_pairs = v != "0",
             "--slider-pairs" => a.slider_pairs = v != "0",
             "--slider-pawn" => a.slider_pawn = v != "0",
-            "--threats" => a.threats = v != "0",
+            "--threats" => panic!("--threats: the threat family is retired (the originality audit, R2)"),
             "--attacked" => a.attacked = v != "0",
             "--least-attacker" => a.least_attacker = v != "0",
             "--king-zone" => a.king_zone = v != "0",
@@ -288,7 +309,14 @@ fn parse_args() -> Args {
             "--init-only" => a.init_only = v != "0",
             "--freeze-base" => a.freeze_base = v != "0",
             "--train-output" => a.train_output = v != "0",
+            "--resume" => a.resume = Some(v),
+            "--start-superbatch" => a.start_superbatch = num(&v) as usize,
             "--eval-fens" => a.eval_fens = Some(v),
+            "--stream" => a.stream = v != "0",
+            "--shuffle-mb" => a.shuffle_mb = num(&v) as usize,
+            "--chunk" => a.chunk = num(&v) as usize,
+            "--seed" => a.seed = num(&v) as u64,
+            "--stream-check" => a.stream_check = Some(num(&v) as u64),
             "--layers" => {
                 let (x, y) = v.split_once(',').expect("--layers L1,L2");
                 a.layers = Some((num(x) as usize, num(y) as usize));
@@ -309,6 +337,8 @@ const SEVEN: [usize; 32] = [
     3, 3, 4, 5,
     6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
 ];
+// TEN is bullet's example layout (examples/progression/3_input_buckets.rs),
+// never trained here.
 #[rustfmt::skip]
 const TEN: [usize; 32] = [
     0, 1, 2, 3,
@@ -353,13 +383,21 @@ macro_rules! run {
                 return;
             }
         }
+        if let Some(checkpoint) = &args.resume {
+            assert!(args.init.is_none() && frozen.is_none(), "--resume: not with --init or --freeze-base");
+            $trainer.load_from_checkpoint(checkpoint);
+        }
+        assert!(
+            (1..=args.superbatches).contains(&args.start_superbatch),
+            "--start-superbatch: from 1 to --superbatches"
+        );
         let schedule = TrainingSchedule {
             net_id: args.id.clone(),
             eval_scale: args.scale,
             steps: TrainingSteps {
                 batch_size: args.batch_size,
                 batches_per_superbatch: args.batches,
-                start_superbatch: 1,
+                start_superbatch: args.start_superbatch,
                 end_superbatch: args.superbatches,
             },
             wdl_scheduler: wdl::ConstantWDL { value: args.wdl },
@@ -372,9 +410,18 @@ macro_rules! run {
             output_directory: &args.out,
             batch_queue_size: $queue,
         };
-        let files: Vec<&str> = args.data.iter().map(String::as_str).collect();
-        let data_loader = loader::DirectSequentialDataLoader::new(&files);
-        $trainer.run(&schedule, &settings, &data_loader);
+        if args.stream {
+            let data_loader = stream::StreamLoader::new(stream::sources(&args.data), args.chunk, args.shuffle_mb, args.seed);
+            $trainer.run(&schedule, &settings, &data_loader);
+        } else {
+            // Files read front to back: shuffled ones (tools/nnue/mix-data.sh); folders and weights need --stream 1.
+            for d in &args.data {
+                assert!(std::path::Path::new(d).is_file(), "--data {d}: not a file (a folder or a weight needs --stream 1)");
+            }
+            let files: Vec<&str> = args.data.iter().map(String::as_str).collect();
+            let data_loader = loader::DirectSequentialDataLoader::new(&files);
+            $trainer.run(&schedule, &settings, &data_loader);
+        }
         // A frozen-base run's checkpoints hold the deltas: the effective
         // weights, for a next stage's --init.
         if let Some(f) = &frozen {
@@ -394,7 +441,7 @@ fn warm_plan(args: &Args) -> warm::Plan {
     warm::Plan {
         output_kingstate: args.output_kingstate,
         output_endgame: args.output_endgame,
-        data: args.data[0].clone(),
+        data: stream::first_file(&args.data[0]),
     }
 }
 
@@ -878,7 +925,7 @@ fn print_all<I: SparseInputType<RequiredDataType = ChessBoard> + Copy>(args: &Ar
 // the same input types training would use (the plain flat net unmirrored).
 fn coverage_run<B: SparseInputType<RequiredDataType = ChessBoard>>(args: &Args, base: B, mirrored: bool, blocks: usize) {
     let o = coverage::Options {
-        path: args.data[0].clone(),
+        path: stream::first_file(&args.data[0]),
         limit: args.coverage.unwrap_or(0),
         blocks,
         output_buckets: args.output_buckets,
@@ -898,6 +945,10 @@ fn main() {
     let args = parse_args();
     if let Some((input, output)) = &args.convert {
         kingstate::convert(input, output);
+        return;
+    }
+    if let Some(n) = args.stream_check {
+        stream::check(&args.data, args.chunk, args.shuffle_mb, args.seed, n);
         return;
     }
     let flat_mirrored = [0usize; 32];

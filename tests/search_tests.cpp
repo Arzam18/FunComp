@@ -1,3 +1,4 @@
+#include "bench.h"
 #include "bingo.h"
 #include "cont_log.h"
 #include "datagen.h"
@@ -87,35 +88,52 @@ void see_agrees(const char* name, const char* fen, const char* uci) {
 }
 
 void test_see() {
+    // The values in params::see_piece_value, which the exchanges count (tuned:
+    // 3.1 moved them off the hand-written 320, 330, 500, 900).
+    const int P = params::see_piece_value[0], N = params::see_piece_value[1],
+              B = params::see_piece_value[2], R = params::see_piece_value[3], Q = params::see_piece_value[4];
     see_agrees("Rxd1, the pawn recaptures and promotes", "4k3/8/8/8/3R4/8/4p3/3r2K1 w - - 0 1", "d4d1");
     see_agrees("...Rxd8, the pawn recaptures and promotes", "3R2k1/4P3/8/3r4/8/8/8/4K3 b - - 0 1", "d5d8");
-    see_case("undefended pawn", "1k1r4/1pp4p/p7/4p3/8/P5P1/1PP4P/2K1R3 w - - 0 1", "e1e5", 100);
-    see_case("queen takes defended pawn", "4k3/8/3p4/4p3/8/8/8/4QK2 w - - 0 1", "e1e5", -800);
-    see_case("knight takes defended pawn", "4k3/8/3p4/4p3/8/5N2/8/4K3 w - - 0 1", "f3e5", -220);
+    see_case("undefended pawn", "1k1r4/1pp4p/p7/4p3/8/P5P1/1PP4P/2K1R3 w - - 0 1", "e1e5", P);
+    see_case("queen takes defended pawn", "4k3/8/3p4/4p3/8/8/8/4QK2 w - - 0 1", "e1e5", P - Q);
+    see_case("knight takes defended pawn", "4k3/8/3p4/4p3/8/5N2/8/4K3 w - - 0 1", "f3e5", P - N);
     // White's second rook joins from behind the first; so does Black's.
     // Without x-rays this would come out at +100.
-    see_case("x-ray battery", "4k3/4r3/4r3/4p3/8/8/4R3/4RK2 w - - 0 1", "e2e5", -400);
+    see_case("x-ray battery", "4k3/4r3/4r3/4p3/8/8/4R3/4RK2 w - - 0 1", "e2e5", P - R);
     // Nxc4 Nxc4 Bxc4: the defender's recapture only loses more, so the
     // exchange must be played to the end, not cut off after it.
     see_case("recapture that doesn't help",
-             "r2k3r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R2K3R w - - 2 1", "e2c4", -330);
+             "r2k3r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R2K3R w - - 2 1", "e2c4", -B);
     // A king can't recapture on a square the other king guards.
     see_case("king can't recapture next to king",
-             "8/2p5/1p1p2p1/1P1Bpk2/p1Pr4/P3K3/8/4R3 w - - 8 1", "d5e4", -330);
+             "8/2p5/1p1p2p1/1P1Bpk2/p1Pr4/P3K3/8/4R3 w - - 8 1", "d5e4", -B);
     see_case("pawn guarded by king", "8/2p5/1p1p2pk/1P1B4/p1P2K2/P6q/8/2Q5 b - - 0 1", "g6g5", 0);
-    see_case("quiet move to attacked square", "4k3/8/3p4/8/8/3N4/8/4K3 w - - 0 1", "d3e5", -320);
+    see_case("quiet move to attacked square", "4k3/8/3p4/8/8/3N4/8/4K3 w - - 0 1", "d3e5", -N);
     see_case("quiet move to safe square", "4k3/8/3p4/8/8/3N4/8/4K3 w - - 0 1", "d3f4", 0);
     // The king may take only if nothing takes it back.
-    see_case("king takes undefended", "4k3/8/8/8/8/8/3p4/4K3 w - - 0 1", "e1d2", 100);
+    see_case("king takes undefended", "4k3/8/8/8/8/8/3p4/4K3 w - - 0 1", "e1d2", P);
     see_case("en passant counts as even", "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1", "e5d6", 0);
     // Promotions gain the new piece less the pawn, and the new piece is
     // what can be taken back.
-    see_case("safe promotion", "4k3/P7/8/8/8/8/8/4K3 w - - 0 1", "a7a8q", 800);
-    see_case("promotion onto a guarded square", "7r/P3k3/8/8/8/8/8/4K3 w - - 0 1", "a7a8q", -100);
-    see_case("capture-promotion, retaken", "r3k3/1P6/1n6/8/8/8/8/4K3 w - - 0 1", "b7a8q", 400);
+    see_case("safe promotion", "4k3/P7/8/8/8/8/8/4K3 w - - 0 1", "a7a8q", Q - P);
+    see_case("promotion onto a guarded square", "7r/P3k3/8/8/8/8/8/4K3 w - - 0 1", "a7a8q", -P);
+    see_case("capture-promotion, retaken", "r3k3/1P6/1n6/8/8/8/8/4K3 w - - 0 1", "b7a8q", R - P);
     // Qxb8 Rxb8 axb8=Q: the recapture would lose the rook to a promoting
-    // pawn, so Black declines it (without the promotion: -80).
-    see_case("pawn recapture promotes", "1n5r/P7/4k3/8/8/8/8/1Q2K3 w - - 0 1", "b1b8", 320);
+    // pawn, so Black declines it (without the promotion: N - Q + R).
+    see_case("pawn recapture promotes", "1n5r/P7/4k3/8/8/8/8/1Q2K3 w - - 0 1", "b1b8", N);
+    // The exchanges count the search's values (params::see_piece_value), not
+    // SEE_VALUE: a bishop taking a defended knight loses their difference.
+    const char* bishop_takes = "4k3/8/3p4/4n3/8/8/1B6/4K3 w - - 0 1";
+    see_case("bishop takes defended knight", bishop_takes, "b2e5", N - B);
+    // A bishop worth a knight trades even; a queen at 1,000 promotes for 900.
+    params::see_piece_value[2] = N;
+    params::see_piece_value[4] = 1000;
+    see_case("bishop takes defended knight, the bishop at the knight's value", bishop_takes, "b2e5", 0);
+    see_case("safe promotion, the queen at 1000", "4k3/P7/8/8/8/8/8/4K3 w - - 0 1", "a7a8q", 900);
+    see_agrees("...Rxd8, the pawn recaptures and promotes, the queen at 1000",
+               "3R2k1/4P3/8/3r4/8/8/8/4K3 b - - 0 1", "d5d8");
+    params::see_piece_value[2] = B;
+    params::see_piece_value[4] = Q;
 }
 
 // The mop-up term in `fen` is worth exactly `value` to the side to move.
@@ -1644,6 +1662,26 @@ void test_datagen() {
         std::ostringstream all;
         opt.quiet = false;
         check(data_text("datagen_test_c.bin", all, opt, log) == 3, "datagen: text export with captures");
+        // The quiescence test (qsquiet): a huge margin keeps what quiet=0 keeps; without a searcher it refuses.
+        {
+            Searcher qs(16);
+            TextOptions q = opt;
+            q.qs_quiet = 100000;
+            std::ostringstream kept, refused, qlog;
+            check(data_text("datagen_test_c.bin", kept, q, qlog, &qs) == 3, "datagen: qsquiet with a huge margin keeps all");
+            check(data_text("datagen_test_c.bin", refused, q, qlog) == 0 &&
+                      qlog.str().find("qsquiet needs the engine's searcher") != std::string::npos,
+                  "datagen: qsquiet without a searcher refuses");
+            // Plain quiescence: what the captures alone make of the static eval.
+            Position hang;
+            hang.set_fen("4k3/8/8/3q4/4P3/8/8/4K3 w - - 0 1");  // exd5 wins the queen
+            check(qs.quiescence(hang, {}, true) - qs.root_eval(hang).static_eval >= 600,
+                  "quiescence plain: a hanging queen raises the score");
+            Position calm;
+            calm.set_fen("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1");  // no capture anywhere
+            check(qs.quiescence(calm, {}, true) == qs.root_eval(calm).static_eval,
+                  "quiescence plain: no captures, the static eval itself");
+        }
         // Thinning: a rate of one keeps everything; a huge rate, nothing.
         opt.thin = {{0, 1}};
         std::ostringstream thin_all, thin_none;
@@ -2444,7 +2482,7 @@ void check_net(const std::string& label,
         if (count == 0) break;
         r = r * 6364136223846793005ULL + 1;
         pos.make_move(moves[static_cast<std::size_t>((r >> 33) % static_cast<std::uint64_t>(count))], st[ply]);
-        e.push(st[ply].dirty);
+        e.push(st[ply].changes);
         // Evaluate only every third ply, so stale views travel down the stack.
         if (ply % 3 == 0) same = e.evaluate(pos) == nnue::evaluate(pos) && e.evaluate(pos) == evaluate(pos);
     }
@@ -2466,7 +2504,7 @@ void check_net(const std::string& label,
             r = r * 6364136223846793005ULL + 1;
             const Move m = moves[static_cast<std::size_t>((r >> 33) % static_cast<std::uint64_t>(count))];
             pos.make_move(m, sib[0]);
-            e.push(sib[0].dirty);
+            e.push(sib[0].changes);
             if ((r >> 20) & 1) walk = e.evaluate(pos) == nnue::evaluate(pos);
             MoveList replies;
             int n = 0;
@@ -2474,7 +2512,7 @@ void check_net(const std::string& label,
             if (n && walk) {
                 const Move m2 = replies[static_cast<std::size_t>((r >> 40) % static_cast<std::uint64_t>(n))];
                 pos.make_move(m2, sib[1]);
-                e.push(sib[1].dirty);
+                e.push(sib[1].changes);
                 walk = e.evaluate(pos) == nnue::evaluate(pos);
                 e.pop();
                 pos.unmake_move(m2, sib[1]);
@@ -2484,7 +2522,7 @@ void check_net(const std::string& label,
         }
         r = r * 6364136223846793005ULL + 1;
         pos.make_move(moves[static_cast<std::size_t>((r >> 33) % static_cast<std::uint64_t>(count))], st[ply]);
-        e.push(st[ply].dirty);
+        e.push(st[ply].changes);
         if (ply % 2 == 0 && walk) walk = e.evaluate(pos) == nnue::evaluate(pos);
     }
     check(walk, "nnue (" + label + "): updates across taken-back moves match a refresh");
@@ -2716,24 +2754,12 @@ void test_nnue() {
           "nnue: a multi-layer file with pair families loaded");
     check_net("multi-layer, pair families", sliders);
 
-    // Threats and square control (square_features.h): one known threat,
-    // the families' sizes in a quiet position, then a network with every
-    // extra family along random games.
+    // Square control (square_features.h): the families' sizes in a quiet
+    // position and a known pawn-piece predicate, a file declaring the retired
+    // threat family refused, then a network with every extra family along
+    // random games.
     {
-        Position p;
-        p.set_fen("4k3/8/8/3p4/4N3/8/8/4K3 w - - 0 1");  // the d5 pawn attacks the e4 knight
         std::uint32_t in[sqfeat::MAX_ACTIVE];
-        const int n_t = sqfeat::inputs(p, sqfeat::Threats, Color::White, 0, in);
-        const int d5 = 35, e4 = 28;
-        const int place = std::popcount(sqfeat::threat_reach(1, 0, d5) & (bit(e4) - 1));
-        const bool threat = n_t == 1 && in[0] == static_cast<std::uint32_t>((sqfeat::threat_slot(1, 0, d5) + place) * 12 + 1);
-        // From Black's side the same threat: its own pawn (attacking up its
-        // board) on d4, the other side's knight on e5.
-        const int n_b = sqfeat::inputs(p, sqfeat::Threats, Color::Black, 0, in);
-        const int d4 = 27, e5 = 36;
-        const int place_b = std::popcount(sqfeat::threat_reach(0, 0, d4) & (bit(e5) - 1));
-        const bool threat_b =
-            n_b == 1 && in[0] == static_cast<std::uint32_t>((sqfeat::threat_slot(0, 0, d4) + place_b) * 12 + 6 + 1);
         Position start;
         const int n_s1 = sqfeat::inputs(start, sqfeat::Attacked, Color::White, 0, in);
         const int n_s2 = sqfeat::inputs(start, sqfeat::LeastAttacker, Color::White, 0, in);
@@ -2742,15 +2768,15 @@ void test_nnue() {
         q.set_fen("4k3/8/8/3p4/3B4/2N5/8/4K3 w - - 0 1");
         const int n_a2 = sqfeat::inputs(q, sqfeat::PawnPieces, Color::White, 0, in);
         const bool a2 = n_a2 == 2 && in[0] == (2 * 2 + 1) * 64 + 35 && in[1] == (3 * 2 + 1) * 64 + 35;
-        check(threat && threat_b && n_s1 == 44 && a2 && n_s2 == 44 &&
-                  sqfeat::threat_slot(1, 5, 63) + std::popcount(sqfeat::threat_reach(1, 5, 63)) == sqfeat::THREAT_SLOTS,
-              "square features: threats, attacked squares, least attackers");
+        check(n_s1 == 44 && a2 && n_s2 == 44, "square features: attacked squares, least attackers, pawn-piece predicates");
     }
+    write_test_net(file, hidden, 7, true, 8, seven, true, true, 0, 0, sqfeat::RETIRED_THREATS);
+    check(!nnue::load(file), "nnue: a file declaring the retired threat family refused");
     write_test_net(file, hidden, 7, true, 8, seven, true, true, 0, 0, pairfeat::ALL | sqfeat::ALL | nnue::PAWN_SPANS_BIT);
     check(nnue::load(file) && nnue::pair_families() == pairfeat::ALL && nnue::square_families() == sqfeat::ALL,
-          "nnue: a file with threats and square control loaded");
-    check_net("threats and square control");
-    check_net("threats and square control, many sliders", sliders);
+          "nnue: a file with square control loaded");
+    check_net("square control");
+    check_net("square control, many sliders", sliders);
     bool square_mirror = true;
     for (const char* fen : {"3r2k1/1b3ppp/2q5/p2Pp3/P3P3/2Q2B2/3R1PPP/3R2K1 w - - 0 25",
                             "6k1/5ppp/2n5/3Nn3/5N2/8/5PPP/3R2K1 b - - 0 30"}) {
@@ -2760,7 +2786,7 @@ void test_nnue() {
         c.set_fen(flip_fen(fen));
         square_mirror = square_mirror && nnue::evaluate(a) == nnue::evaluate(b) && nnue::evaluate(a) == nnue::evaluate(c);
     }
-    check(square_mirror, "nnue: threats and square control, left-right and colour symmetric");
+    check(square_mirror, "nnue: square control, left-right and colour symmetric");
     check(nnue::pawn_span_features(), "nnue: the pawn-control map loaded");
     {
         // King-state buckets (15, by location x shelter, castling rights a
@@ -3016,7 +3042,18 @@ void test_nnue() {
     std::remove("nnue_test_bad.bin");
 }
 
-int main() {
+int main(int argc, char** argv) {
+    // "search_tests bench": the bench from this copy of the engine, whose
+    // parameters are variables. ctest holds it to the same count as the
+    // engine's own, frozen where FROZEN_PARAMS is on: both forms must search
+    // alike.
+    if (argc >= 2 && std::string(argv[1]) == "bench") {
+        init_zobrist();
+        if (nnue::embedded()) nnue::load("<embedded>");  // as the engine's bench does
+        Searcher searcher;
+        bench(searcher, BENCH_DEPTH, std::cout);
+        return 0;
+    }
     test_see();
     test_mop_up();
     test_null_move();

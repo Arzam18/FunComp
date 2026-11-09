@@ -1,5 +1,6 @@
 #include "search.h"
 #include "cont_log.h"
+#include "tree_sample.h"
 #include "eval.h"
 #include "movegen.h"
 #include "params.h"
@@ -962,7 +963,7 @@ void Searcher::verify_pruned_move(Position& pos, Move m, prune::Heuristic h, int
     stack_[static_cast<std::size_t>(ply + 1)].extensions = stack_[static_cast<std::size_t>(ply)].extensions;
     stack_[static_cast<std::size_t>(ply + 1)].doubles = stack_[static_cast<std::size_t>(ply)].doubles;
     pos.make_move(m, st);
-    eval_.push(st.dirty);
+    eval_.push(st.changes);
     const int score = -negamax(pos, depth - 1, -alpha - 1, -alpha, ply + 1, true);
     eval_.pop();
     pos.unmake_move(m, st);
@@ -999,7 +1000,7 @@ int Searcher::qsearch(Position& pos, int alpha, int beta, int ply) {
         tt_score = score_from_tt(e.score, ply);
         tt_bound = e.bound();
         tt_pv = tt_pv || e.is_pv();
-        if (!pv_node && !pure) {
+        if (!pv_node && !pure && !qs_plain_) {
             if (tt_bound == TT::EXACT ||
                 (tt_bound == TT::LOWER && tt_score >= beta) ||
                 (tt_bound == TT::UPPER && tt_score <= alpha))
@@ -1008,8 +1009,9 @@ int Searcher::qsearch(Position& pos, int alpha, int beta, int ply) {
     }
     // Store a result, unless the table already holds a deeper search of
     // this position: a quiescence result would only replace it with less.
+    // A plain quiescence (a measurement) leaves the table as it found it.
     auto store = [&](int score, Move best_move, int raw_eval) {
-        if (tt_depth > 0) return;
+        if (tt_depth > 0 || qs_plain_) return;
         const auto bound = score >= beta ? TT::LOWER : score > alpha_orig ? TT::EXACT : TT::UPPER;
         tt_.store(tt_key(pos), best_move, score_to_tt(score, ply), raw_eval, 0, bound, tt_pv);
     };
@@ -1030,8 +1032,10 @@ int Searcher::qsearch(Position& pos, int alpha, int beta, int ply) {
         // Stand pat: the side to move can usually do at least as well as
         // the static evaluation by declining every capture.
         raw_eval = tt_eval != NO_EVAL ? tt_eval : eval_.evaluate(pos);
-        best = pure ? raw_eval
-                    : sharpen_eval(corrected_eval(pos, raw_eval, correction(pos, -1)), tt_score, tt_bound);
+        if (CONT_LOG_BUILD && tree_sample_) tree_sample_->maybe(pos, 'q', 0, ply, raw_eval);
+        best = pure        ? raw_eval
+               : qs_plain_ ? corrected_eval(pos, raw_eval, correction(pos, -1))
+                           : sharpen_eval(corrected_eval(pos, raw_eval, correction(pos, -1)), tt_score, tt_bound);
         if (best >= beta) {
             const int firm = pure ? best : fail_firm(best, beta, params::ff_stand_pat_pct);
             count_feature(prune::FailFirm, firm != best);
@@ -1130,7 +1134,7 @@ int Searcher::qsearch(Position& pos, int alpha, int beta, int ply) {
         StateInfo st;
         pos.make_move(m, st);
         tt_.prefetch(tt_key(pos));
-        eval_.push(st.dirty);
+        eval_.push(st.changes);
         const int score = -qsearch(pos, -beta, -alpha, ply + 1);
         eval_.pop();
         pos.unmake_move(m, st);
@@ -1186,7 +1190,7 @@ int Searcher::probcut(Position& pos, int depth, int pc_beta, int eval, Move tt_m
         stack_[static_cast<std::size_t>(ply + 1)].doubles = ss.doubles;
         pos.make_move(m, st);
         tt_.prefetch(tt_key(pos));
-        eval_.push(st.dirty);
+        eval_.push(st.changes);
         int v = -qsearch(pos, -pc_beta, -pc_beta + 1, ply + 1);
         if (v >= pc_beta && !stopped_)
             v = -negamax(pos, depth - params::probcut_reduction, -pc_beta, -pc_beta + 1, ply + 1,
@@ -1322,6 +1326,8 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
     // be sharpened by the hash score, and is what pruning decides with.
     // A pure search uses the raw eval as it is (it only orders moves there).
     const int raw_eval = in_check ? NO_EVAL : tt_eval != NO_EVAL ? tt_eval : eval_.evaluate(pos);
+    if (CONT_LOG_BUILD && tree_sample_ && !in_check && ply >= 1 && excluded == Move{})
+        tree_sample_->maybe(pos, 'm', depth, ply, raw_eval);
     const int corr = in_check || pure ? 0 : correction(pos, ply);
     ss.static_eval = in_check ? NO_EVAL : pure ? raw_eval : corrected_eval(pos, raw_eval, corr);
     const int static_eval = ss.static_eval;
@@ -1480,7 +1486,7 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
             keys_.push_back(pos.key());
             pos.make_null_move(st);
             tt_.prefetch(tt_key(pos));
-            eval_.push(st.dirty);
+            eval_.push(st.changes);
             ss.move = Move{};
             ss.piece = NO_PIECE;
             ss.quiet = false;
@@ -1791,7 +1797,7 @@ int Searcher::negamax(Position& pos, int depth, int alpha, int beta, int ply, bo
         const std::uint64_t nodes_before = nodes_;
         pos.make_move(m, st, any_check);
         tt_.prefetch(tt_key(pos));
-        eval_.push(st.dirty);
+        eval_.push(st.changes);
         ++searched;
 
         // Principal variation search: the first move gets the full window.
@@ -2063,7 +2069,7 @@ Searcher::RootEval Searcher::root_eval(const Position& pos) {
     return {static_eval, static_eval - raw};
 }
 
-int Searcher::quiescence(Position& pos, const std::vector<std::uint64_t>& history) {
+int Searcher::quiescence(Position& pos, const std::vector<std::uint64_t>& history, bool plain) {
     nodes_ = 0;
     node_limit_ = 0;
     soft_ms_ = hard_ms_ = 0;
@@ -2075,7 +2081,10 @@ int Searcher::quiescence(Position& pos, const std::vector<std::uint64_t>& histor
     null_barrier_ = 0;
     verify_depth_ = 0;
     tb_pieces_ = 0;  // the score of the position's captures, not a tablebase verdict
-    return qsearch(pos, -INF, INF, 0);
+    qs_plain_ = plain;
+    const int score = qsearch(pos, -INF, INF, 0);
+    qs_plain_ = false;
+    return score;
 }
 
 Move Searcher::search(Position& pos, const SearchLimits& limits,
@@ -2265,10 +2274,13 @@ Move Searcher::search(Position& pos, const SearchLimits& limits,
                 }
             }
             if (soft_ms_ && elapsed_ms() >= std::min(limit_base_ms_ + soft_ms_ * pct / 100, hard_ms_)) break;
-            if (scaled_nodes && nodes_ >= limits.soft_nodes * static_cast<std::uint64_t>(pct) / 100) break;
+            if (scaled_nodes && depth >= limits.min_depth &&
+                nodes_ >= limits.soft_nodes * static_cast<std::uint64_t>(pct) / 100)
+                break;
         }
         // Nodes: likewise past a soft node limit, unscaled without soft_scale.
-        if (limits.soft_nodes && !limits.soft_scale && nodes_ >= limits.soft_nodes) break;
+        if (limits.soft_nodes && !limits.soft_scale && depth >= limits.min_depth && nodes_ >= limits.soft_nodes)
+            break;
         // A forced mate found within this depth can't get any shorter.
         if (score > MATE_BOUND && MATE - score <= depth) break;
     }

@@ -69,7 +69,7 @@ public:
         return in_check_slow(c);
     }
 
-    // Also records in st.dirty every piece-square change the move makes.
+    // Also records in st.changes every piece-square change the move makes.
     void make_move(Move move, StateInfo& st) {
         apply_move(move, st);
         checkers_ = compute_checkers();
@@ -117,7 +117,7 @@ public:
     bool gives_check(Move m, const CheckInfo& ci) const;
 
     // Passes the turn without moving, for null-move pruning. Clears the en
-    // passant square and advances the halfmove clock; st.dirty is empty.
+    // passant square and advances the halfmove clock; st.changes is empty.
     void make_null_move(StateInfo& st);
     void unmake_null_move(const StateInfo& st);
 

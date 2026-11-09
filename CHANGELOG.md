@@ -1,5 +1,56 @@
 # Changelog
 
+## FunComp 3.1 (2026-10-29)
+
+**Strength.** About **3660 on the CCRL Blitz scale**: 3662 ± 8 from a
+single-threaded gauntlet of 2,000 games at 10+0.1 against the 20 rated
+engines of 3.0's (CCRL Blitz 3492-3793), about 20 above 3.0 (3642 ± 8).
+Against 3.0 directly: +23 ± 9 Elo in 1,000 self-play games from balanced
+openings (8+0.08: 144 wins, 779 draws, 77 losses). An estimate on our
+hardware, not an official CCRL rating.
+
+**Binaries.**
+- `funcomp-3.1-x86-64-v3.exe`: for CPUs with AVX2 and BMI2 (Intel
+  Haswell, AMD Zen and later). The faster x86 build.
+- `funcomp-3.1-x86-64.exe`: for any 64-bit x86 CPU.
+- `funcomp-3.1-android-armv8-dotprod`: for 64-bit ARM CPUs with the dot
+  product instructions (most phones since about 2018). The faster ARM
+  build.
+- `funcomp-3.1-android-armv8`: for any 64-bit ARM CPU (arm64-v8a).
+
+The Android builds run on Android 7 or later. All are statically linked
+and carry the network inside: nothing to download or set. Bench: 1031103
+nodes for x86-64-v3 and both ARM builds, 1094101 for x86-64 (whose later
+layers run in plain C++ and round differently). The UCI options are 3.0's.
+
+**What's new.**
+- *Android and ARM:* builds for 64-bit ARM with NEON, computing exactly
+  what the x86-64-v3 build does.
+- *A new network,* trained on 4.7 billion positions of FunComp's own games
+  (five rounds of self-play; 3.0's had three and 1.44 billion), with two
+  small layers after the first: 1,024 → 32 → 32 → 1.
+- *Code cleanup and optimization,* and the search re-tuned for the new
+  network.
+
+**Checked before release.**
+- A stress run of 8,000 games on both x86 builds (bullet, 1 s + 0.01 s,
+  and 40 moves in 10 s, 24 at a time): no crashes, disconnects or illegal
+  moves; no time losses at 40 moves in 10 s (see the limitations for
+  bullet).
+- Threads with tablebases in bullet (4 threads, Syzygy, 2+0.02, five
+  games at a time), 2,000 games: no crashes, disconnects or illegal moves.
+- No time losses in the 3,000 timed games of the gauntlet and the match
+  against 3.0.
+- The Android builds give the x86-64-v3 build's bench under emulation
+  (their speed on a phone is not measured here).
+
+**Known limitations.**
+- No Chess960.
+- In bullet with every hardware thread busy, about 1 game in 1,000 was
+  lost on time (6 of 6,000 at 1 s + 0.01 s and 2 s + 0.02 s; 3.0: about 3
+  in 1,000), by 2 to 30 ms, most likely to the operating system's
+  scheduling: raise `Move Overhead` (default 30 ms) in such setups.
+
 ## FunComp 3.0 (2026-10-20)
 
 The first FunComp with a neural network evaluation (NNUE), trained only on

@@ -14,13 +14,11 @@
 // Squares in the view's orientation and mirroring; "own" and "other" from
 // the view's side; piece types P N B R Q K = 0-5.
 //
-//   T, threats (feature set bit 4): a piece attacking an occupied square
-//     (blockers counted, no x-rays), the target either side's (threats and
-//     defences). ((attacker's colour x 6 + type) block, by the attacker's
-//     square, then the target's place among the squares that piece type
-//     attacks from there on an empty board (pawns of the view's side
-//     attack up the board, the other's down)) x 12 + target colour x 6 +
-//     target type: 7,532 x 12 = 90,384 inputs.
+//   Bit 4 is retired: family T, every piece attacking every occupied square,
+//     mirrored Stockfish 19's threat inputs (tools/nnue/originality-audit.md,
+//     R2) and was never in a net that shipped; a network declaring it is
+//     refused at load. Threat knowledge by chess logic is family W, on its
+//     own branch (family-w).
 //   S1, attacked (bit 5): squares each side attacks: colour x 64 + square,
 //     128 inputs.
 //   S2, least valuable attacker (bit 6): for each square a side attacks,
@@ -62,18 +60,16 @@
 //     move counted): 1,024 inputs. Only passed pawns, so usually a few.
 //
 // A family past its bound in a view contributes none there (all or nothing,
-// as for the pair families; only threats can reach theirs).
+// as for the pair families).
 namespace sqfeat {
 
 enum Family : unsigned {
-    Threats = 16, Attacked = 32, LeastAttacker = 64, KingZone = 128, PawnPieces = 512, ControlCounts = 1024,
-    Mobility = 32768, Passers = 131072
+    Attacked = 32, LeastAttacker = 64, KingZone = 128, PawnPieces = 512, ControlCounts = 1024, Mobility = 32768,
+    Passers = 131072
 };
-inline constexpr unsigned ALL =
-    Threats | Attacked | LeastAttacker | KingZone | PawnPieces | ControlCounts | Mobility | Passers;
+inline constexpr unsigned RETIRED_THREATS = 16;  // bit 4: refused (above)
+inline constexpr unsigned ALL = Attacked | LeastAttacker | KingZone | PawnPieces | ControlCounts | Mobility | Passers;
 
-inline constexpr int THREAT_SLOTS = 7532;
-inline constexpr int THREAT_FEATURES = 12 * THREAT_SLOTS;
 inline constexpr int ATTACKED_FEATURES = 128;
 inline constexpr int LEAST_ATTACKER_FEATURES = 768;
 inline constexpr int KING_ZONE_FEATURES = 128;
@@ -85,17 +81,11 @@ inline constexpr int MOBILITY_FEATURES = 4 * MOBILITY_STEPS;
 inline constexpr int MOBILITY_MAX = MOBILITY_FEATURES;  // can't pass it
 inline constexpr int PASSER_PIECE_LABELS = 8;
 inline constexpr int PASSER_PIECE_FEATURES = PASSER_PIECE_LABELS * 2 * 64;
-inline constexpr int THREAT_MAX = 256;
 inline constexpr int SQUARE_MAX = 128;  // S1-S3, A2 and P can't pass it
-inline constexpr int MAX_ACTIVE = THREAT_MAX + 5 * SQUARE_MAX + CONTROL_COUNT_MAX + MOBILITY_MAX;
+inline constexpr int MAX_ACTIVE = 5 * SQUARE_MAX + CONTROL_COUNT_MAX + MOBILITY_MAX;
 
 // Inputs in the block of the families in `families` (Family bits).
 int block_size(unsigned families);
-
-// The first slot of (colour, type, square)'s threat block and the squares
-// it covers (colour 0 the view's side: its pawns attack up the board).
-int threat_slot(int colour, int type, int square);
-Bitboard threat_reach(int colour, int type, int square);
 
 // The active inputs of `families` from `view` (its squares mirrored
 // left-right when flip is 7), as offsets into their block, ascending.

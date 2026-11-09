@@ -19,6 +19,7 @@
 #include "tablebase.h"
 #include "telemetry.h"
 #include "threads.h"
+#include "tree_sample.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -120,7 +121,7 @@ void uci_loop() {
         if(cmd=="quit") break;
 
         if(cmd=="uci") {
-            std::cout << "id name FunComp 3.0\n";
+            std::cout << "id name FunComp 3.1\n";
             std::cout << "id author Moxnar\n";
             std::cout << "option name Hash type spin default 64 min 1 max 4096\n";
             std::cout << "option name Threads type spin default 1 min 1 max " << MAX_THREADS << '\n';
@@ -188,7 +189,6 @@ void uci_loop() {
                               << (nnue::pair_families() & pairfeat::SliderPawn ? ", slider x pawn" : "")
                               << (nnue::pair_families() & pairfeat::ConnectedPairs ? ", connected pairs" : "")
                               << (nnue::pair_families() & pairfeat::LineControl ? ", line control" : "")
-                              << (nnue::square_families() & sqfeat::Threats ? ", threats" : "")
                               << (nnue::square_families() & sqfeat::Attacked ? ", attacked squares" : "")
                               << (nnue::square_families() & sqfeat::LeastAttacker ? ", least attackers" : "")
                               << (nnue::square_families() & sqfeat::KingZone ? ", king zone" : "")
@@ -219,10 +219,25 @@ void uci_loop() {
                 // "pstats". Diagnostic only: slows and alters the search.
                 pool.main().set_verify_rate(std::stoi(value));
             } else if(!value.empty()) {
-                // Search parameters are always settable, even when a normal
-                // build doesn't advertise them.
-                for(const auto& t : params::tunables())
-                    if(name==t.name) *t.value=std::clamp(std::stoi(value),t.min,t.max);
+                // Search parameters are settable even when a normal build
+                // doesn't advertise them, except where a frozen build has
+                // them as constants (params.h). Asked for another value, it
+                // stops rather than play on unnoticed with the wrong one: a
+                // TUNE build sets them. The value it has is accepted.
+                for(const auto& t : params::tunables()) {
+                    if(name!=t.name) continue;
+                    const int v=std::clamp(std::stoi(value),t.min,t.max);
+                    if(t.set) {
+                        *t.set=v;
+                    } else if(v!=*t.value) {
+                        const std::string error="info string error: " + name + " is fixed at " +
+                            std::to_string(*t.value) + " in this build, asked for " + value +
+                            " (a TUNE build sets it)";
+                        std::cout << error << std::endl;
+                        std::cerr << error << std::endl;
+                        std::exit(1);
+                    }
+                }
             }
         } else if(cmd=="ucinewgame") {
             pos.set_startpos();
@@ -287,6 +302,7 @@ void uci_loop() {
                 // Data generation's limits, for probes (tools/research/depth_probe.py).
                 else if(arg=="softnodes") ss>>limits.soft_nodes;
                 else if(arg=="softscale") { int v=0; ss>>v; limits.soft_scale=v!=0; }
+                else if(arg=="mindepth") ss>>limits.min_depth;
                 else if(arg=="nodes") ss>>limits.nodes;
                 else if(arg=="infinite") limits.infinite=true;
                 else if(arg=="ponder") limits.ponder=true;
@@ -411,6 +427,81 @@ void uci_loop() {
             }
             if(opt.in.empty()) std::cout << "info string telemetry needs in=<pgn>" << std::endl;
             else game_telemetry(pool.main(),opt,std::cout);
+        } else if(cmd=="treesample") {
+            // "treesample in=<pgn>|fens=<file> out=<file> [positions=N] [nodes=N]
+            //  [rate=N] [minply=N] [seed=N]": the positions where the search
+            // reads its static eval, on positions from a PGN's games or a list;
+            // see tree_sample.h.
+            TreeSampleOptions opt;
+            std::string tok;
+            while(ss>>tok) {
+                const auto eq=tok.find('=');
+                if(eq==std::string::npos) continue;
+                const std::string key=tok.substr(0,eq), val=tok.substr(eq+1);
+                if(key=="in") opt.in=val;
+                else if(key=="fens") opt.fens=val;
+                else if(key=="out") opt.out=val;
+                else if(key=="positions") opt.positions=std::max(1,std::stoi(val));
+                else if(key=="nodes") opt.nodes=std::stoull(val);
+                else if(key=="rate") opt.rate=std::max(1,std::stoi(val));
+                else if(key=="minply") opt.min_ply=std::max(0,std::stoi(val));
+                else if(key=="seed") opt.seed=std::stoull(val);
+            }
+            if((opt.in.empty() && opt.fens.empty()) || opt.out.empty())
+                std::cout << "info string treesample needs in=<pgn> or fens=<file>, and out=<file>" << std::endl;
+            else tree_sample(pool.main(),opt,std::cout);
+        } else if(cmd=="evalfens") {
+            // "evalfens in=<file> out=<file> [nodes=N] [skip=N] [count=N]": the
+            // raw eval, a quiescence search and a search to N nodes for each
+            // line's position; see tree_sample.h.
+            EvalFensOptions opt;
+            std::string tok;
+            while(ss>>tok) {
+                const auto eq=tok.find('=');
+                if(eq==std::string::npos) continue;
+                const std::string key=tok.substr(0,eq), val=tok.substr(eq+1);
+                if(key=="in") opt.in=val;
+                else if(key=="out") opt.out=val;
+                else if(key=="nodes") opt.nodes=std::stoull(val);
+                else if(key=="skip") opt.skip=std::stoull(val);
+                else if(key=="count") opt.count=std::stoull(val);
+            }
+            if(opt.in.empty() || opt.out.empty()) std::cout << "info string evalfens needs in=<file> and out=<file>" << std::endl;
+            else eval_fens(pool.main(),opt,std::cout);
+        } else if(cmd=="labelfens") {
+            // "labelfens in=<file> out=<text> [nodes=N] [skip=N] [count=N]": each
+            // line's position labelled by a search to N nodes, written as the
+            // trainer's text; see tree_sample.h.
+            LabelFensOptions opt;
+            std::string tok;
+            while(ss>>tok) {
+                const auto eq=tok.find('=');
+                if(eq==std::string::npos) continue;
+                const std::string key=tok.substr(0,eq), val=tok.substr(eq+1);
+                if(key=="in") opt.in=val;
+                else if(key=="out") opt.out=val;
+                else if(key=="nodes") opt.nodes=std::stoull(val);
+                else if(key=="skip") opt.skip=std::stoull(val);
+                else if(key=="count") opt.count=std::stoull(val);
+            }
+            if(opt.in.empty() || opt.out.empty()) std::cout << "info string labelfens needs in=<file> and out=<text>" << std::endl;
+            else label_fens(pool.main(),opt,std::cout);
+        } else if(cmd=="perturb") {
+            // "perturb in=<file> out=<file> [plies=N] [seed=N]": each line's
+            // position moved N random legal moves away; see tree_sample.h.
+            PerturbOptions opt;
+            std::string tok;
+            while(ss>>tok) {
+                const auto eq=tok.find('=');
+                if(eq==std::string::npos) continue;
+                const std::string key=tok.substr(0,eq), val=tok.substr(eq+1);
+                if(key=="in") opt.in=val;
+                else if(key=="out") opt.out=val;
+                else if(key=="plies") opt.plies=std::max(1,std::stoi(val));
+                else if(key=="seed") opt.seed=std::stoull(val);
+            }
+            if(opt.in.empty() || opt.out.empty()) std::cout << "info string perturb needs in=<file> and out=<file>" << std::endl;
+            else perturb_fens(opt,std::cout);
         } else if(cmd=="genlabels") {
             // "genlabels out=<file> [in=<file>] [games=N] [randomplies=N]
             //  [depth=N] [sample=N] [depthscale=PCT] [maxdepth=N] [count=N]
@@ -511,7 +602,7 @@ void uci_loop() {
             else generate_cont_log(opt,std::cout);
         } else if(cmd=="gendata") {
             // "gendata out=<file> [worker=N] [seed=N] [hours=H] [games=N]
-            //  [softnodes=N] [hardnodes=N] [softscale=0|1] [dropsoftnodes=N] [drophardnodes=N]
+            //  [softnodes=N] [hardnodes=N] [softscale=0|1] [mindepth=N] [dropsoftnodes=N] [drophardnodes=N]
             //  [backsoftnodes=N] [backhardnodes=N]
             //  [bingoevery=N] [randomplies=A-B]
             //  [maxopenscore=CP] [maxplies=N] [hash=MB] [adjscore=CP]
@@ -537,6 +628,7 @@ void uci_loop() {
                 else if(key=="softnodes") opt.soft_nodes=std::stoull(val);
                 else if(key=="hardnodes") opt.hard_nodes=std::stoull(val);
                 else if(key=="softscale") opt.soft_scale=val!="0";
+                else if(key=="mindepth") opt.min_depth=std::clamp(std::stoi(val),0,64);
                 else if(key=="dropsoftnodes") opt.drop_soft_nodes=std::stoull(val);
                 else if(key=="drophardnodes") opt.drop_hard_nodes=std::stoull(val);
                 else if(key=="backsoftnodes") opt.back_soft_nodes=std::stoull(val);
@@ -634,8 +726,9 @@ void uci_loop() {
             else label_pgn(opt,std::cout);
         } else if(cmd=="rescore") {
             // "rescore in=<data> out=<new data> [softnodes=N] [hardnodes=N]
-            //  [softscale=0|1] [hash=MB] [games=N]": new labels for stored
-            // positions with the loaded network; see datagen.h.
+            //  [softscale=0|1] [hash=MB] [games=N] [roll=N,N,...] [backpass=N]":
+            // new labels for stored positions with the loaded network, rolled
+            // down the played line or by a backward pass; see datagen.h.
             RescoreOptions opt;
             std::string tok;
             while(ss>>tok) {
@@ -649,6 +742,12 @@ void uci_loop() {
                 else if(key=="softscale") opt.soft_scale=val!="0";
                 else if(key=="hash") opt.hash_mb=std::max(1,std::stoi(val));
                 else if(key=="games") opt.games=std::stoull(val);
+                else if(key=="backpass") opt.back_pass=std::stoull(val);
+                else if(key=="roll") {
+                    std::stringstream list(val);
+                    for(std::string item; std::getline(list,item,',');)
+                        if(!item.empty()) opt.roll.push_back(std::stoull(item));
+                }
             }
             if(opt.in.empty() || opt.out.empty())
                 std::cout << "info string rescore needs in=<data> and out=<new data>" << std::endl;
@@ -659,7 +758,8 @@ void uci_loop() {
             //  [drawkeep=P] [gamekeep=P] [hardscore=T] [hardswing=S] [hardcopies=K]
             //  [blend=W] [blendscale=K] [rescale=F] [fiftyscale=N]
             //  [castleclean=PLY] [drop=SLICE,...] [index=<first-index file>
-            //  part=a|b]": positions as text for the trainer; see datagen.h.
+            //  part=a|b] [qsquiet=CP] [tdlambda=L tdplies=N tdcap=CP]": positions as text for the trainer; see
+            //  datagen.h (qsquiet with the network to test with loaded).
             //  An unknown slice name or part ignores the command.
             std::string in, out, tok;
             TextOptions opt;
@@ -670,7 +770,11 @@ void uci_loop() {
                 if(key=="in") in=val;
                 else if(key=="out") out=val;
                 else if(key=="quiet") opt.quiet=val!="0";
+                else if(key=="qsquiet") opt.qs_quiet=std::max(-1,std::stoi(val));
                 else if(key=="label") opt.backward=val=="back";
+                else if(key=="tdlambda") opt.td_lambda=std::clamp(std::stod(val),0.0,1.0);
+                else if(key=="tdplies") opt.td_plies=std::clamp(std::stoi(val),1,32);
+                else if(key=="tdcap") opt.td_cap=std::max(1,std::stoi(val));
                 else if(key=="unscale") opt.unscale=val!="0";
                 else if(key=="cap") opt.cap=std::max(0,std::stoi(val));
                 else if(key=="drawkeep") opt.draw_keep_pct=std::clamp(std::stoi(val),0,100);
@@ -708,7 +812,7 @@ void uci_loop() {
                 std::cout << "info string datatext needs in=<file> and a writable out=<file>" << std::endl;
             else if(opt.part && opt.index.empty())
                 std::cout << "info string datatext: part= needs index=<first-index file>" << std::endl;
-            else data_text(in,file,opt,std::cout);
+            else data_text(in,file,opt,std::cout,&pool.main());
         } else if(cmd=="featstats") {
             // "featstats in=<data file or directory> [games=N]": candidate
             // input-feature families measured on played games; see featstats.h.
@@ -765,24 +869,47 @@ void uci_loop() {
             } catch(const std::exception&) {
                 std::cout << "info string datashuffle: a number expected in mem=, seed= or record=" << std::endl;
             }
+        } else if(cmd=="relabel") {
+            // "relabel in=<file> out=<file> [scale=180]": a training file's
+            // scores replaced by the loaded network's static evaluations (round
+            // 6's distillation). See datagen.h.
+            RelabelOptions opt;
+            std::string tok;
+            try {
+                while(ss>>tok) {
+                    const auto eq=tok.find('=');
+                    if(eq==std::string::npos) continue;
+                    const std::string key=tok.substr(0,eq), val=tok.substr(eq+1);
+                    if(key=="in") opt.in=val;
+                    else if(key=="out") opt.out=val;
+                    else if(key=="scale") opt.scale=std::stoi(val);
+                }
+                if(opt.in.empty() || opt.out.empty())
+                    std::cout << "info string relabel needs in=<file> and out=<file>" << std::endl;
+                else relabel_data(opt,std::cout);
+            } catch(const std::exception&) {
+                std::cout << "info string relabel: a number expected in scale=" << std::endl;
+            }
         } else if(cmd=="datadump" || cmd=="datastats") {
-            // "datadump in=<file> [games=N]": every searched position of the
+            // "datadump in=<file> [games=N] [back=1]": every searched position of the
             // games, one line each; "datastats in=<file or directory>":
             // totals and distributions; [scale=K] the data's eval scale (round 1
             // 120, round 2 180) for the conversion table. See datagen.h.
             std::string in, tok;
             std::uint64_t games=0;
             int scale=120;
+            bool back=false;  // datadump: the backward pass's fields too
             while(ss>>tok) {
                 const auto eq=tok.find('=');
                 if(eq==std::string::npos) continue;
                 const std::string key=tok.substr(0,eq), val=tok.substr(eq+1);
                 if(key=="in") in=val;
                 else if(key=="games") games=std::stoull(val);
+                else if(key=="back") back=val!="0";
                 else if(key=="scale") scale=std::stoi(val);
             }
             if(in.empty()) std::cout << "info string " << cmd << " needs in=<file>" << std::endl;
-            else if(cmd=="datadump") dump_data(in,games,std::cout);
+            else if(cmd=="datadump") dump_data(in,games,std::cout,back);
             else data_stats(in,std::cout,scale);
             std::cout << std::flush;
         }

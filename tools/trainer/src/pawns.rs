@@ -128,7 +128,7 @@ pub fn predicates(pos: &ChessBoard, mut f: impl FnMut(usize, usize, usize)) {
 
 /// Piece inputs `B` followed by the extra feature sets the network declares,
 /// in the engine's order (src/nnue.h): the pawn predicates, then knight
-/// pairs, slider pairs and slider x pawn (pairs.rs), threats, attacked
+/// pairs, slider pairs and slider x pawn (pairs.rs), attacked
 /// squares, least attackers and king zone (squares.rs), each in the view's
 /// orientation and mirroring.
 ///
@@ -146,7 +146,6 @@ pub struct WithExtras<B> {
     pub knights: bool,
     pub sliders: bool,
     pub slider_pawns: bool,
-    pub threats: bool,
     pub attacked: bool,
     pub least_attacker: bool,
     pub king_zone: bool,
@@ -182,7 +181,6 @@ impl<B: SparseInputType<RequiredDataType = ChessBoard>> SparseInputType for With
             + if self.knights { pairs::KNIGHT_FEATURES } else { 0 }
             + if self.sliders { pairs::SLIDER_FEATURES } else { 0 }
             + if self.slider_pawns { pairs::SLIDER_PAWN_FEATURES } else { 0 }
-            + if self.threats { squares::THREAT_FEATURES } else { 0 }
             + if self.attacked { squares::ATTACKED_FEATURES } else { 0 }
             + if self.least_attacker { squares::LEAST_ATTACKER_FEATURES } else { 0 }
             + if self.king_zone { squares::KING_ZONE_FEATURES } else { 0 }
@@ -203,7 +201,6 @@ impl<B: SparseInputType<RequiredDataType = ChessBoard>> SparseInputType for With
             + if self.knights { pairs::MAX_ACTIVE } else { 0 }
             + if self.sliders { pairs::FAMILY_MAX } else { 0 }
             + if self.slider_pawns { pairs::FAMILY_MAX } else { 0 }
-            + if self.threats { squares::THREAT_MAX } else { 0 }
             + if self.attacked { squares::SQUARE_MAX } else { 0 }
             + if self.least_attacker { squares::SQUARE_MAX } else { 0 }
             + if self.king_zone { squares::SQUARE_MAX } else { 0 }
@@ -287,8 +284,7 @@ impl<B: SparseInputType<RequiredDataType = ChessBoard>> SparseInputType for With
             off += pairs::LINE_FEATURES;
         }
         let flips = [stm_flip, ntm_flip];
-        let families: [(bool, fn(&ChessBoard, [usize; 2]) -> Vec<(usize, usize)>, usize); 8] = [
-            (self.threats, squares::threats, squares::THREAT_FEATURES),
+        let families: [(bool, fn(&ChessBoard, [usize; 2]) -> Vec<(usize, usize)>, usize); 7] = [
             (self.attacked, squares::attacked, squares::ATTACKED_FEATURES),
             (self.least_attacker, squares::least_attacker, squares::LEAST_ATTACKER_FEATURES),
             (self.king_zone, squares::king_zone, squares::KING_ZONE_FEATURES),
@@ -311,7 +307,7 @@ impl<B: SparseInputType<RequiredDataType = ChessBoard>> SparseInputType for With
         let p = if self.pawns { "+pawns" } else { "" };
         let k = if self.knights { "+knightpairs" } else { "" };
         let k = format!("{k}{}{}", if self.sliders { "+sliderpairs" } else { "" }, if self.slider_pawns { "+sliderpawn" } else { "" });
-        let k = format!("{k}{}", if self.threats || self.attacked || self.least_attacker || self.king_zone || self.connected || self.pawn_pieces || self.pawn_spans || self.control_counts || self.line_control || self.mobility || self.passers { "+more" } else { "" });
+        let k = format!("{k}{}", if self.attacked || self.least_attacker || self.king_zone || self.connected || self.pawn_pieces || self.pawn_spans || self.control_counts || self.line_control || self.mobility || self.passers { "+more" } else { "" });
         let f = format!("{}{}", if self.factorised { "+factoriser" } else { "" }, if self.pawns && self.pawn_factorised { "+pawnfactoriser" } else { "" });
         format!("{}{p}{k}{f}", self.base.shorthand())
     }
@@ -320,7 +316,7 @@ impl<B: SparseInputType<RequiredDataType = ChessBoard>> SparseInputType for With
         let p = if self.pawns { ", with pawn predicates" } else { "" };
         let k = if self.knights { ", with knight pairs" } else { "" };
         let k = format!("{k}{}{}", if self.sliders { ", with slider pairs" } else { "" }, if self.slider_pawns { ", with slider x pawn" } else { "" });
-        let k = format!("{k}{}", if self.threats || self.attacked || self.least_attacker || self.king_zone || self.connected || self.pawn_pieces || self.pawn_spans || self.control_counts || self.line_control || self.mobility || self.passers { ", with more extra families" } else { "" });
+        let k = format!("{k}{}", if self.attacked || self.least_attacker || self.king_zone || self.connected || self.pawn_pieces || self.pawn_spans || self.control_counts || self.line_control || self.mobility || self.passers { ", with more extra families" } else { "" });
         let f = format!("{}{}", if self.factorised { ", factorised" } else { "" }, if self.pawns && self.pawn_factorised { ", predicates factorised" } else { "" });
         format!("{}{p}{k}{f}", self.base.description())
     }

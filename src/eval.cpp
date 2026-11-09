@@ -261,7 +261,8 @@ int Evaluator::score(const Accumulator& acc, Color side_to_move) {
 void Evaluator::reset(const Position& pos) {
     top_ = 0;
     stack_[0] = compute(pos);
-    if (nnue::active()) {
+    network_ = nnue::active();
+    if (network_) {
         if (nnue_.empty()) nnue_.resize(STACK_SIZE);
         if (nnue::extra_families() && nnue_extras_.empty()) nnue_extras_.resize(STACK_SIZE);
         for (std::size_t i = 0; i < nnue_.size(); ++i)
@@ -271,10 +272,18 @@ void Evaluator::reset(const Position& pos) {
     }
 }
 
-void Evaluator::push(const DirtyPieces& dirty) {
+void Evaluator::push(const MoveChanges& changes) {
+    // With a network the hand-written sums go unread (evaluate() returns the
+    // network's score, eval_parts() computes its own): only the network's
+    // accumulator moves.
+    if (network_) {
+        nnue::update(nnue_[static_cast<std::size_t>(top_)], nnue_[static_cast<std::size_t>(top_) + 1], changes);
+        ++top_;
+        return;
+    }
     Accumulator acc = stack_[static_cast<std::size_t>(top_)];
-    for (int i = 0; i < dirty.count; ++i) {
-        const DirtyPiece& d = dirty.d[i];
+    for (int i = 0; i < changes.count; ++i) {
+        const PieceChange& d = changes.list[i];
         const int p = d.piece;
         const int side = p < BP ? 0 : 1;
         if (d.from >= 0) {
@@ -290,9 +299,6 @@ void Evaluator::push(const DirtyPieces& dirty) {
             acc.phase -= PHASE_INC[type_of(p)];  // piece leaves the board
         }
     }
-    if (nnue::active())
-        nnue::update(nnue_[static_cast<std::size_t>(top_)], nnue_[static_cast<std::size_t>(top_) + 1],
-                     dirty);
     stack_[static_cast<std::size_t>(++top_)] = acc;
 }
 

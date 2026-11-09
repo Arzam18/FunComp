@@ -2,10 +2,15 @@
 #include <vector>
 
 // Search parameters, gathered in one place so they can be retuned when the
-// evaluation changes (their right values depend on its scale). They are
-// plain variables rather than constants so that a tuning build can set
-// them through UCI options: configure with -DTUNE=ON and every entry in
-// tunables() is advertised as a spin option, ready for SPSA.
+// evaluation changes (their right values depend on its scale). A tuning
+// build has them as plain variables, set through UCI options: configure
+// with -DTUNE=ON and every entry in tunables() is advertised as a spin
+// option, ready for SPSA. Release and datagen builds (FROZEN_PARAMS, on
+// unless TUNE) compile them as constants instead, which the compiler folds
+// into the code: 2.3-3.9% faster on one thread and 3.0% at datagen's 32
+// copies, the same search (results.md, "Frozen parameters"). The tests
+// keep them variables. NnueScale and Move Overhead are variables in every
+// build: each network brings its own scale, and the GUI sets the overhead.
 //
 // Of the pruning parameters, the search reads only the depth limits that
 // decide whether a heuristic applies at all. Margins, thresholds and
@@ -18,6 +23,12 @@
 // features were tested at alone; the tuned values are what they settled
 // at together, so the two can differ widely. Switches (on/off options)
 // were not tuned.
+#ifdef FUNCOMP_FROZEN_PARAMS
+#define FUNCOMP_PARAM constexpr
+#else
+#define FUNCOMP_PARAM
+#endif
+
 namespace params {
 
 // Time management. The soft limit (no new iteration after it) is scaled
@@ -30,11 +41,11 @@ namespace params {
 // time-management SPSA (at 20+0.2, all the terms below with it) turned it
 // on, and the tuned set gained +64.1 +- 14.6 Elo at 40+0.4 (778 games),
 // using 2% more time per move (5% more in the first 20 moves).
-inline int tm_stable_start = 158;
-inline int tm_stable_step = 14;
-inline int tm_stable_min = 79;
-inline int tm_drop_scale = 47;
-inline int tm_drop_max = 56;
+inline FUNCOMP_PARAM int tm_stable_start = 158;
+inline FUNCOMP_PARAM int tm_stable_step = 14;
+inline FUNCOMP_PARAM int tm_stable_min = 79;
+inline FUNCOMP_PARAM int tm_drop_scale = 47;
+inline FUNCOMP_PARAM int tm_drop_max = 56;
 // And by how much of the search went into the best move: from depth
 // tm_nodes_min_depth, with frac the percentage of the root moves' nodes
 // (over all iterations so far) spent under the best one, the soft limit is
@@ -43,10 +54,10 @@ inline int tm_drop_max = 56;
 // think longer. 100 / 0 turns it off. On at 230 / 180: +26.3 +- 10.4 Elo at
 // 8+0.08 (1982 games) and +14.8 +- 9.4 at 40+0.4 (2018 games), using 2-3%
 // less time per move.
-inline int tm_nodes_base = 251;
-inline int tm_nodes_slope = 151;
-inline int tm_nodes_min = 65;
-inline int tm_nodes_min_depth = 7;
+inline FUNCOMP_PARAM int tm_nodes_base = 251;
+inline FUNCOMP_PARAM int tm_nodes_slope = 151;
+inline FUNCOMP_PARAM int tm_nodes_min = 65;
+inline FUNCOMP_PARAM int tm_nodes_min_depth = 7;
 
 // Time kept in hand per move for GUI and operating-system latency, in
 // milliseconds. Also the UCI option "Move Overhead" in every build.
@@ -58,23 +69,23 @@ inline int move_overhead = 30;
 // on the clock (or as the move time) the root is ranked by WDL alone: the
 // result is kept, and the search goes on probing to make progress. 0
 // always ranks by DTZ.
-inline int tm_tb_dtz_min_ms = 1000;
+inline FUNCOMP_PARAM int tm_tb_dtz_min_ms = 1000;
 
 // The time allocated to a move: target = time left / tm_moves_to_go (when
 // the GUI gives no moves-to-go) + tm_inc_pct percent of the increment. The
 // hard limit is tm_hard_pct percent of the target, at most tm_hard_cap_pct
 // percent of the time left plus the increment; no new iteration starts
 // past tm_soft_pct percent of the target (scaled as above).
-inline int tm_moves_to_go = 25;
-inline int tm_inc_pct = 76;
-inline int tm_hard_pct = 305;
-inline int tm_hard_cap_pct = 51;
-inline int tm_soft_pct = 64;
+inline FUNCOMP_PARAM int tm_moves_to_go = 25;
+inline FUNCOMP_PARAM int tm_inc_pct = 76;
+inline FUNCOMP_PARAM int tm_hard_pct = 305;
+inline FUNCOMP_PARAM int tm_hard_cap_pct = 51;
+inline FUNCOMP_PARAM int tm_soft_pct = 64;
 
 // Root aspiration windows.
-inline int asp_min_depth = 7;   // first iteration searched with a window
-inline int asp_delta = 13;      // initial half-width of the window, cp
-inline int asp_widen_pct = 42;  // each failed window widens by this percent
+inline FUNCOMP_PARAM int asp_min_depth = 7;   // first iteration searched with a window
+inline FUNCOMP_PARAM int asp_delta = 13;      // initial half-width of the window, cp
+inline FUNCOMP_PARAM int asp_widen_pct = 42;  // each failed window widens by this percent
 
 // History heuristic. A quiet move that causes a cutoff at depth d gets a
 // bonus of min(hist_bonus_mult * d * d, hist_bonus_max); quiets searched
@@ -82,9 +93,9 @@ inline int asp_widen_pct = 42;  // each failed window widens by this percent
 // +-hist_max, so they never outrank killers or captures. Each update is
 // clamped to +-hist_max, which keeps that bound at any setting; the tables
 // hold 16-bit values, so hist_max is at most 32767.
-inline int hist_bonus_mult = 42;
-inline int hist_bonus_max = 2079;
-inline int hist_max = 6553;
+inline FUNCOMP_PARAM int hist_bonus_mult = 42;
+inline FUNCOMP_PARAM int hist_bonus_max = 2079;
+inline FUNCOMP_PARAM int hist_max = 6553;
 // Eval-change history: after the opponent's quiet move, the change in the
 // static eval from its side (delta), times eval_hist_mult / 16, clamped to
 // -eval_hist_malus_max..eval_hist_bonus_max, updates that move in its
@@ -95,19 +106,19 @@ inline int hist_max = 6553;
 // (history pruning fired at 46% of its tries against 38%), likely a
 // negative offset in the delta (a quiet move rarely raises its own
 // side's static eval): measure and centre the delta before retrying.
-inline int eval_hist_mult = 25;
-inline int eval_hist_bonus_max = 1018;
-inline int eval_hist_malus_max = 333;
-inline int eval_hist_max_depth = 9;
+inline FUNCOMP_PARAM int eval_hist_mult = 25;
+inline FUNCOMP_PARAM int eval_hist_bonus_max = 1018;
+inline FUNCOMP_PARAM int eval_hist_malus_max = 333;
+inline FUNCOMP_PARAM int eval_hist_max_depth = 9;
 // The penalty for the quiet moves searched before the cutoff, likewise:
 // min(hist_malus_mult * d * d, hist_malus_max). Capture history has its
 // own bonus and penalty on the same pattern.
-inline int hist_malus_mult = 73;
-inline int hist_malus_max = 980;
-inline int capt_bonus_mult = 51;
-inline int capt_bonus_max = 2893;
-inline int capt_malus_mult = 7;
-inline int capt_malus_max = 2773;
+inline FUNCOMP_PARAM int hist_malus_mult = 73;
+inline FUNCOMP_PARAM int hist_malus_max = 980;
+inline FUNCOMP_PARAM int capt_bonus_mult = 51;
+inline FUNCOMP_PARAM int capt_bonus_max = 2893;
+inline FUNCOMP_PARAM int capt_malus_mult = 7;
+inline FUNCOMP_PARAM int capt_malus_max = 2773;
 // Prior-countermove bonus: when every move of a node fails low, the
 // opponent's quiet move that led there gets prior_cm_pct percent of the
 // usual cutoff bonus in its butterfly and continuation histories. 0 turns
@@ -127,55 +138,55 @@ inline int capt_malus_max = 2773;
 // bonuses that came from repeated searches, flat at the tuned 34 (-3.5 +-
 // 7.2 Elo, 4034 games; alone at 100%, -1.0 +- 7.3). The node gate (-5.9 +-
 // 7.2 with the fix, at 100%) and the index cap stay off.
-inline int prior_cm_pct = 3;
+inline FUNCOMP_PARAM int prior_cm_pct = 3;
 // Hash-cutoff history: when a non-PV node is cut off by a hash entry that
 // fails high with a quiet hash move, that move gets tt_cut_hist_pct percent
 // of a searched cutoff's history bonus at the node's depth (no killer, no
 // maluses). 0 turns it off. Off: at 50 it lost -4.8 +- 6.8 Elo (4040 games),
 // rewarding a quiet hash move at 55% of hash cutoffs.
-inline int tt_cut_hist_pct = 24;
-inline int prior_cm_final_only = 1;
-inline int prior_cm_node_gate = 0;
-inline int prior_cm_index_cap = 4;
+inline FUNCOMP_PARAM int tt_cut_hist_pct = 24;
+inline FUNCOMP_PARAM int prior_cm_final_only = 1;
+inline FUNCOMP_PARAM int prior_cm_node_gate = 0;
+inline FUNCOMP_PARAM int prior_cm_index_cap = 4;
 // Capture history (same update rule) orders captures of equal victims;
 // it enters the capture's score as history * capt_hist_mult / 1024 (1/8).
-inline int capt_hist_mult = 192;
+inline FUNCOMP_PARAM int capt_hist_mult = 192;
 // Continuation history 4 plies back (same table and update rule) orders
 // quiet moves, weighted cont_hist4_weight/256; the history that
 // reductions and pruning read leaves it out. 0 turns it off, updates
 // included. On since the 2.0 tune; alone, at 128 it leaned negative (-3.1 +- 6.4 Elo,
 // 5500 games).
-inline int cont_hist4_weight = 183;
+inline FUNCOMP_PARAM int cont_hist4_weight = 183;
 // Quiet moves that give direct check get this much added to their
 // ordering score (history, at most about 49,000 either way, stays well
 // below the killers). Ordering only: checks are already spared LMP and
 // futility pruning. 0 turns it off. Off: at 8000 it lost -13.5 +- 8.1 Elo
 // (3148 games), bumping 12% of the quiet moves searched.
-inline int quiet_check_bonus = 568;
+inline FUNCOMP_PARAM int quiet_check_bonus = 568;
 
 // Pawn history (quiet history by pawn structure) joins the quiet history
 // that orders, reduces and prunes quiet moves, weighted pawn_hist_weight/256.
 // 0 turns it off, updates included. On since the 2.0 tune; alone, at 256 it leaned
 // negative (-5.8 +- 8.3 Elo, 3224 games).
-inline int pawn_hist_weight = 228;
+inline FUNCOMP_PARAM int pawn_hist_weight = 228;
 
 // Transposition table replacement: an entry written in the current search
 // is only overwritten by a search at most tt_replace_margin plies
 // shallower (or an exact score for the same position).
-inline int tt_replace_margin = 2;
+inline FUNCOMP_PARAM int tt_replace_margin = 2;
 // Replacement prefers the entry with the lowest depth - tt_age_weight * age.
-inline int tt_age_weight = 10;
+inline FUNCOMP_PARAM int tt_age_weight = 10;
 // A store from a node flagged ttPv may replace an entry of the same
 // position up to tt_pv_replace_bonus plies deeper than others may: PV
 // information is worth keeping fresh. 0 treats all stores alike (off
 // before the 2.0 tune; alone at 2 it leaned negative, -4.9 +- 7.2 Elo,
 // 4038 games).
-inline int tt_pv_replace_bonus = 4;
+inline FUNCOMP_PARAM int tt_pv_replace_bonus = 4;
 // A node that fails low below a parent flagged ttPv inherits the flag
 // (in its hash entry) when its depth exceeds tt_pv_inherit_depth. 64
 // turns this off (as before the 2.0 tune; alone at 3 it was flat, -1.9
 // +- 7.5 Elo, 4038 games).
-inline int tt_pv_inherit_depth = 3;
+inline FUNCOMP_PARAM int tt_pv_inherit_depth = 3;
 
 // Pawn correction history. After each search of a node that isn't in
 // check, the gap between its score and its raw static eval is folded into
@@ -183,34 +194,36 @@ inline int tt_pv_inherit_depth = 3;
 // the average is added to later static evals in the same structure. Each
 // update weighs min(depth + 1, corr_weight_max) / 256, and the correction
 // is capped at +-corr_limit centipawns.
-inline int corr_weight_max = 14;
-inline int corr_limit = 39;
+inline FUNCOMP_PARAM int corr_weight_max = 14;
+inline FUNCOMP_PARAM int corr_limit = 24;
 // Non-pawn correction history: the same per side to move and each
 // colour's non-pawn pieces (king included), updated alike; their sum
 // enters the eval weighted by corr_nonpawn_weight/256 (0 turns it off).
-inline int corr_nonpawn_weight = 186;
+inline FUNCOMP_PARAM int corr_nonpawn_weight = 181;
 // Continuation correction history: the same per side to move and the move
 // that led to the position (its piece and destination), updated alike and
 // weighted corr_cont_weight/256 (0 turns it off). Main-search nodes only:
 // quiescence doesn't record its moves.
-inline int corr_cont_weight = 107;
+inline FUNCOMP_PARAM int corr_cont_weight = 120;
 // Reverse futility and futility margins grow by corr_margin_pct percent of
 // the correction's size: where correction history moves the eval a lot,
 // the eval is less sure. 0 turns it off (as before the 2.0 tune; alone at
 // 50 it was flat, +2.1 +- 7.4 Elo, 4056 games).
-inline int corr_margin_pct = 62;
+inline FUNCOMP_PARAM int corr_margin_pct = 60;
 
 // Fifty-move scaling: the corrected static eval is multiplied by
 // (fifty_scale - halfmove clock) / fifty_scale, so it shrinks toward a
 // draw as the clock runs (to half at 64 with 128) and the engine prefers
 // moves that make progress. 0 turns it off.
-inline int fifty_scale = 203;
+inline FUNCOMP_PARAM int fifty_scale = 203;
 
 // The network evaluation (nnue.h): centipawns per unit of its output, the
 // trainer's sigmoid scale (the first network: 120, fitted to self-play
-// results; 3.0's network: 184 matched, 188 after the 3.0 fine tune). Used
-// with a network loaded (EvalFile or the embedded one).
-inline int nnue_scale = 188;
+// results; 3.0's network: 184 matched, 188 after the 3.0 fine tune; 3.1's:
+// 185 matched, 192 after 3.1's focused tune). Used with a network loaded
+// (EvalFile or the embedded one). Settable in every build (NnueScale),
+// since each network has its own.
+inline int nnue_scale = 192;
 // Halfmove-clock buckets in the hash-table key: with fifty-move scaling a
 // score depends on the clock, which the position's key leaves out. From
 // fifty_hash_start on, every fifty_hash_width half-moves of clock get a
@@ -218,8 +231,8 @@ inline int nnue_scale = 188;
 // uses, so a score stored at clock 10 isn't reused at clock 80. Repetition
 // detection and the other keys are untouched. Width 0 turns it off. On
 // since 2.0 at 10 / 10: +11.5 +- 10.3 Elo (2018 games).
-inline int fifty_hash_start = 10;
-inline int fifty_hash_width = 7;
+inline FUNCOMP_PARAM int fifty_hash_start = 10;
+inline FUNCOMP_PARAM int fifty_hash_width = 7;
 
 // Mop-up (eval.cpp): against a bare king, the side with mating material
 // earns mop_edge per step of that king's distance from the centre (0-6;
@@ -227,8 +240,8 @@ inline int fifty_hash_width = 7;
 // mop_kings per step the kings are closer than 7 king moves apart. Both
 // 0 turn it off. Accepted: no harm in games (+0.4 +- 6.6 Elo, 4044 games),
 // and at 5 ms a move it mates 46 of 48 bare-king starts against 30.
-inline int mop_edge = 20;
-inline int mop_kings = 10;
+inline FUNCOMP_PARAM int mop_edge = 20;
+inline FUNCOMP_PARAM int mop_kings = 10;
 // Drawishness: endings where an edge rarely converts scale the whole eval
 // toward a draw. Opposite-coloured bishops with no other pieces (pawns
 // allowed) keep draw_ocb_pct percent; pawnless positions where the
@@ -237,9 +250,9 @@ inline int mop_kings = 10;
 // each off. On at 50/50: +15.8 +- 8.8 Elo (2074 games), with the margin at
 // 400, which left queen against rook unscaled; the second full pass took
 // it to 499, which scales that ending too.
-inline int draw_ocb_pct = 73;
-inline int draw_pawnless_pct = 44;
-inline int draw_pawnless_margin = 499;
+inline FUNCOMP_PARAM int draw_ocb_pct = 73;
+inline FUNCOMP_PARAM int draw_pawnless_pct = 44;
+inline FUNCOMP_PARAM int draw_pawnless_margin = 499;
 // Initiative (initiative.cpp): who is making the opponent respond. Added to
 // the PeSTO score; all terms from the side to move's point of view and
 // colour-symmetric. Hand-set at first so that typical positions saw 10-30
@@ -247,18 +260,18 @@ inline int draw_pawnless_margin = 499;
 // (tools/spsa/initiative.csv): +64.9 +- 17.1 more. init_scale scales
 // the whole term in percent (0: off, not computed), tuned with the rest to
 // see whether the style survives; init_clamp caps the raw term.
-inline int init_scale = 226;
-inline int init_clamp = 149;
-inline int init_tempo = 14;           // cp for the side to move
-inline int init_mobility = 14;        // 1/16 cp per weighted safe square
-inline int init_territory = 3;        // 1/4 cp per uncontested square in their half
-inline int init_coordination = 3;     // cp per unit we hit twice, they defend once
-inline int init_push_threat = 14;     // cp per piece a safe pawn push would attack
-inline int init_safe_check = 29;      // cp per piece type with a safe check
-inline int init_king_pressure = 45;   // cp * danger^2 / 256, tapered by phase
-inline int init_threat_latent = 58;   // 1/256 of the stm's two largest threats
-inline int init_threat_pending = 14;   // 1/256 of the largest threat against the stm
-inline int init_threat_double = 60;   // 1/256 of the second largest against it
+inline FUNCOMP_PARAM int init_scale = 226;
+inline FUNCOMP_PARAM int init_clamp = 149;
+inline FUNCOMP_PARAM int init_tempo = 14;           // cp for the side to move
+inline FUNCOMP_PARAM int init_mobility = 14;        // 1/16 cp per weighted safe square
+inline FUNCOMP_PARAM int init_territory = 3;        // 1/4 cp per uncontested square in their half
+inline FUNCOMP_PARAM int init_coordination = 3;     // cp per unit we hit twice, they defend once
+inline FUNCOMP_PARAM int init_push_threat = 14;     // cp per piece a safe pawn push would attack
+inline FUNCOMP_PARAM int init_safe_check = 29;      // cp per piece type with a safe check
+inline FUNCOMP_PARAM int init_king_pressure = 45;   // cp * danger^2 / 256, tapered by phase
+inline FUNCOMP_PARAM int init_threat_latent = 58;   // 1/256 of the stm's two largest threats
+inline FUNCOMP_PARAM int init_threat_pending = 14;   // 1/256 of the largest threat against the stm
+inline FUNCOMP_PARAM int init_threat_double = 60;   // 1/256 of the second largest against it
 // The whole term fades toward the endgame: at phase 0 (no pieces) it keeps
 // init_endgame_pct percent, linearly in the phase (24 = all pieces). Having
 // the move can be a liability in endings, and activity there often doesn't
@@ -266,7 +279,7 @@ inline int init_threat_double = 60;   // 1/256 of the second largest against it
 // games): the term's endgame weight pays; the full SPSA pass tunes it from
 // 100 (both directions open), and took it to 42: a taper after all, with
 // the weights retuned alongside it.
-inline int init_endgame_pct = 42;
+inline FUNCOMP_PARAM int init_endgame_pct = 42;
 // Correction history learns in unscaled units: the searched score is
 // divided by the fifty-move scale before the raw eval is subtracted, so
 // the scaling (applied after the correction) isn't learned as eval error.
@@ -274,12 +287,12 @@ inline int init_endgame_pct = 42;
 // FiftyScale 200 it lost -9.2 +- 7.3 Elo (4064 games), but with the tuned
 // FiftyScale it came out slightly ahead (+4.0 +- 7.4, 4066 games), and it
 // is the correct way to learn.
-inline int corr_unscale_fifty = 1;
+inline FUNCOMP_PARAM int corr_unscale_fifty = 1;
 
 // Upcoming-repetition detection (1: on, 0: off): a node from which one
 // reversible move reaches an earlier position of its line is worth at
 // least a draw.
-inline int rep_in_reach = 1;
+inline FUNCOMP_PARAM int rep_in_reach = 1;
 
 // Pure search (1: on; ROADMAP step 4b, the author 2026-10-15): the evaluation
 // alone, for testing networks against each other at a fixed depth. Nothing
@@ -296,7 +309,7 @@ inline int rep_in_reach = 1;
 // quiescence. Off for play and datagen. 2: the same with the check extension
 // kept (frame P4c, the author 2026-10-17: does a net gain in the full search
 // because the search follows checks against the king further?).
-inline int pure_search = 0;
+inline FUNCOMP_PARAM int pure_search = 0;
 
 // A ladder frame at data generation's limits (L2, the author 2026-10-19: the
 // latest round's datagen configuration, so a ladder match also tells how a
@@ -306,27 +319,27 @@ inline int pure_search = 0;
 // won or lost (positions the export drops) within frame_drop_soft_nodes /
 // frame_drop_hard_nodes when set. 0: off ("go nodes" is a hard limit alone).
 // Options of the frame, not tuned (as PureSearch).
-inline int frame_soft_nodes = 0;
-inline int frame_soft_scale = 0;
-inline int frame_drop_soft_nodes = 0;
-inline int frame_drop_hard_nodes = 0;
+inline FUNCOMP_PARAM int frame_soft_nodes = 0;
+inline FUNCOMP_PARAM int frame_soft_scale = 0;
+inline FUNCOMP_PARAM int frame_drop_soft_nodes = 0;
+inline FUNCOMP_PARAM int frame_drop_hard_nodes = 0;
 
 // A layered network's first dense layer in float as trained (1), or in int8
 // with AVX2 (0, the default; nnue.cpp quantizes it at load, a scale a row):
 // the float path is the reference the int8 one is measured against (the
 // author, 2026-10-18: the float layer cost a layered net about 3x a node).
-inline int nnue_layer_float = 0;
+inline FUNCOMP_PARAM int nnue_layer_float = 0;
 
 // Internal iterative reduction: a PV or cut node with no hash move and at
 // least iir_min_depth plies left is searched one ply shallower. Without a
 // hash move its ordering is poor, and the shallower search fills in one
 // for the next iteration.
-inline int iir_min_depth = 6;
-inline int iir_reduction = 2;  // plies
+inline FUNCOMP_PARAM int iir_min_depth = 6;
+inline FUNCOMP_PARAM int iir_reduction = 2;  // plies
 
 // Check extensions: a checking move is searched a ply deeper if its static
 // exchange is at least check_ext_see (0: checks that don't lose material).
-inline int check_ext_see = 148;
+inline FUNCOMP_PARAM int check_ext_see = 171;
 
 // Singular extensions: at depth >= se_min_depth, if the hash move has a
 // lower-bound or exact score from a search at most se_tt_depth_margin plies
@@ -341,23 +354,23 @@ inline int check_ext_see = 148;
 // When the other moves do reach the bound but it is below beta, a hash move
 // with a score of at least beta, or at a cut node, is searched se_negative
 // plies shallower instead (a negative extension).
-inline int se_min_depth = 7;
-inline int se_tt_depth_margin = 5;
-inline int se_margin = 31;  // in 1/16 cp per ply: 2 cp
-inline int se_max_extensions = 10;
-inline int se_double_margin = 12;
-inline int se_max_doubles = 4;
-inline int se_negative = 2;
+inline FUNCOMP_PARAM int se_min_depth = 7;
+inline FUNCOMP_PARAM int se_tt_depth_margin = 5;
+inline FUNCOMP_PARAM int se_margin = 31;  // in 1/16 cp per ply: 2 cp
+inline FUNCOMP_PARAM int se_max_extensions = 10;
+inline FUNCOMP_PARAM int se_double_margin = 12;
+inline FUNCOMP_PARAM int se_max_doubles = 4;
+inline FUNCOMP_PARAM int se_negative = 2;
 // The probe searches the other moves (depth - 1) * se_probe_depth_pct / 100
 // plies deep, and extensions stop past se_ply_mult times the root depth.
-inline int se_probe_depth_pct = 36;
-inline int se_ply_mult = 4;
+inline FUNCOMP_PARAM int se_probe_depth_pct = 36;
+inline FUNCOMP_PARAM int se_ply_mult = 4;
 // In the probe, the left-out hash move doesn't count towards the other
 // moves' indices (1), so they are reduced and pruned as the moves they
 // are; 0 counts it, one step later for every move. On since 2.0 as a
 // correctness fix: flat both times (-2.6 +- 7.5 Elo before the tune,
 // +2.8 +- 7.2 after it, about 4,000 games each).
-inline int se_probe_skip_index = 1;
+inline FUNCOMP_PARAM int se_probe_skip_index = 1;
 
 // Fail-firm returns: a fail high resting on a static eval or a shallow
 // search keeps only this percentage of its excess over beta (100: all of
@@ -368,30 +381,30 @@ inline int se_probe_skip_index = 1;
 // 9.7 Elo (2228 games): 93% of fail highs pulled in, and the lower stored
 // bounds cut singular extensions (36% of probes against 44%) and
 // alpha-side hash cuts (9% against 18%), which are tuned on the old ones.
-inline int ff_rfp_pct = 70;
-inline int ff_stand_pat_pct = 96;
-inline int ff_probcut_pct = 89;
-inline int ff_main_depth = 0;
+inline FUNCOMP_PARAM int ff_rfp_pct = 70;
+inline FUNCOMP_PARAM int ff_stand_pat_pct = 96;
+inline FUNCOMP_PARAM int ff_probcut_pct = 89;
+inline FUNCOMP_PARAM int ff_main_depth = 0;
 
 // Reverse futility pruning (non-PV, depth <= rfp_max_depth): return the
 // static eval if it beats beta by rfp_margin per ply, less rfp_improving
 // when the eval is improving.
-inline int rfp_max_depth = 6;
-inline int rfp_margin = 35;
-inline int rfp_improving = 43;
+inline FUNCOMP_PARAM int rfp_max_depth = 6;
+inline FUNCOMP_PARAM int rfp_margin = 36;
+inline FUNCOMP_PARAM int rfp_improving = 41;
 // At nodes flagged ttPv, the margin grows by rfp_tt_pv_margin: they may
 // well be on the principal variation, where a static-eval cut is riskiest.
 // 500 all but turns RFP off there; 0 treats them like any other node
 // (as before the 2.0 tune; alone at 500 it leaned negative, -5.3 +- 7.4
 // Elo, 4052 games).
-inline int rfp_tt_pv_margin = 79;
+inline FUNCOMP_PARAM int rfp_tt_pv_margin = 77;
 
 // Razoring (non-PV, depth <= razor_max_depth): if the static eval is
 // razor_base + razor_mult * depth^2 below alpha, drop into quiescence and
 // trust it when it confirms the fail low.
-inline int razor_max_depth = 3;
-inline int razor_base = 197;
-inline int razor_mult = 47;
+inline FUNCOMP_PARAM int razor_max_depth = 3;
+inline FUNCOMP_PARAM int razor_base = 204;
+inline FUNCOMP_PARAM int razor_mult = 53;
 
 // Null-move pruning (non-PV, depth >= nmp_min_depth, eval >= beta).
 // Reduction R, in 1/1024 ply: nmp_base + depth * nmp_depth_mult
@@ -399,43 +412,43 @@ inline int razor_mult = 47;
 // and rounded down to whole plies once (nmp_round_once 1, merged for the
 // 2.0 tuning, whose finer steps need it; undecided as a no-harm test at
 // -2.3 +- 6.1 Elo), or each term rounded on its own (0, as in 1.0).
-inline int nmp_min_depth = 4;
-inline int nmp_base = 2979;
-inline int nmp_depth_mult = 372;  // a ply per 3 of depth (exact below depth 128)
-inline int nmp_eval_mult = 766;  // a ply per 200 cp
-inline int nmp_eval_max = 1436;
-inline int nmp_round_once = 1;
+inline FUNCOMP_PARAM int nmp_min_depth = 4;
+inline FUNCOMP_PARAM int nmp_base = 2979;
+inline FUNCOMP_PARAM int nmp_depth_mult = 372;  // a ply per 3 of depth (exact below depth 128)
+inline FUNCOMP_PARAM int nmp_eval_mult = 753;  // a ply per 200 cp
+inline FUNCOMP_PARAM int nmp_eval_max = 1518;
+inline FUNCOMP_PARAM int nmp_round_once = 1;
 
 // ProbCut (non-PV, depth >= probcut_min_depth): captures whose static
 // exchange covers the gap from the eval to beta + probcut_margin (less
 // probcut_improving when improving) are searched probcut_reduction plies
 // shallower against that raised bound, after quiescence agrees; one that
 // beats it cuts the node. probcut_min_depth 64 turns it off.
-inline int probcut_min_depth = 3;
-inline int probcut_margin = 100;
-inline int probcut_improving = 2;
-inline int probcut_reduction = 3;
+inline FUNCOMP_PARAM int probcut_min_depth = 3;
+inline FUNCOMP_PARAM int probcut_margin = 95;
+inline FUNCOMP_PARAM int probcut_improving = 4;
+inline FUNCOMP_PARAM int probcut_reduction = 3;
 // ProbCut is skipped when the hash table has a score below the raised bound
 // from at least depth - probcut_tt_margin; its cuts are stored at that depth.
-inline int probcut_tt_margin = 7;
+inline FUNCOMP_PARAM int probcut_tt_margin = 7;
 
 // Alpha-side hash cut (non-PV, depth >= alpha_tt_min_depth): a hash entry
 // from a search at most alpha_tt_depth_margin plies shallower whose upper
 // bound is at least alpha_tt_margin below alpha fails the node low at once.
 // alpha_tt_min_depth 64 turns it off (as before the 2.0 tune; alone at 5
 // it was flat, -0.7 +- 6.1 Elo, 6016 games).
-inline int alpha_tt_min_depth = 7;
-inline int alpha_tt_depth_margin = 2;
-inline int alpha_tt_margin = 226;
+inline FUNCOMP_PARAM int alpha_tt_min_depth = 7;
+inline FUNCOMP_PARAM int alpha_tt_depth_margin = 2;
+inline FUNCOMP_PARAM int alpha_tt_margin = 226;
 
 // Late move pruning (depth <= lmp_max_depth): stop trying quiet moves
 // after (lmp_base + lmp_mult * depth^2) / 100 of them, and lmp_not_improving_pct
 // percent of that when the eval is not improving. Moves that give check are
 // spared.
-inline int lmp_max_depth = 9;
-inline int lmp_base = 609;  // in 1/100 move
-inline int lmp_not_improving_pct = 70;  // share of the count when not improving
-inline int lmp_mult = 38;
+inline FUNCOMP_PARAM int lmp_max_depth = 9;
+inline FUNCOMP_PARAM int lmp_base = 609;  // in 1/100 move
+inline FUNCOMP_PARAM int lmp_not_improving_pct = 70;  // share of the count when not improving
+inline FUNCOMP_PARAM int lmp_mult = 38;
 
 // Once late move pruning has fired, the move picker drops the remaining
 // quiet moves it would skip (1: sparing the gives_check test and the
@@ -443,56 +456,66 @@ inline int lmp_mult = 38;
 // The moves searched are the same; each later move counts, in its move
 // index, the dropped moves that would have sorted before it. Accepted:
 // +11.5 +- 10.6 Elo (+13-15% nps).
-inline int lmp_in_picker = 1;
+inline FUNCOMP_PARAM int lmp_in_picker = 1;
 
 // Underpromotions, once a move has been searched (not at the root, not in
 // check): rook and bishop promotions are skipped, and knight promotions
 // unless they give check (1); 0 searches them all. A queen does at least
 // as well but for stalemate tricks and knight forks. Accepted as marginal:
 // +3.2 +- 6.0 Elo, 6012 games.
-inline int underpromo_prune = 1;
+inline FUNCOMP_PARAM int underpromo_prune = 1;
 
 // History pruning (lmr depth <= hist_prune_max_depth): skip a quiet move
 // (not a check) whose combined history is below -hist_prune_mult * depth.
 // hist_prune_max_depth -1 turns it off.
-inline int hist_prune_max_depth = 7;
-inline int hist_prune_mult = 1699;
+inline FUNCOMP_PARAM int hist_prune_max_depth = 7;
+inline FUNCOMP_PARAM int hist_prune_mult = 1699;
 
 // Futility pruning of quiet moves (reduced depth <= fp_max_depth): skip
 // the move if static eval + fp_base + fp_mult * reduced depth <= alpha.
-inline int fp_max_depth = 13;
-inline int fp_base = 117;
-inline int fp_mult = 137;
+inline FUNCOMP_PARAM int fp_max_depth = 13;
+inline FUNCOMP_PARAM int fp_base = 113;
+inline FUNCOMP_PARAM int fp_mult = 141;
 
 // SEE pruning (depth <= see_max_depth): skip captures losing more than
 // see_capture_margin * depth, and quiets losing more than
 // see_quiet_margin * reduced depth^2. Quiescence skips captures whose
 // exchange falls below qs_see_threshold.
-inline int see_max_depth = 7;
-inline int see_capture_margin = 48;
-inline int see_quiet_margin = 17;
-inline int qs_see_threshold = -6;
+inline FUNCOMP_PARAM int see_max_depth = 7;
+inline FUNCOMP_PARAM int see_capture_margin = 44;
+inline FUNCOMP_PARAM int see_quiet_margin = 17;
+inline FUNCOMP_PARAM int qs_see_threshold = -12;
+// The piece values the search's static exchanges count, indexed by
+// PieceType (king last, never captured): see_at_least and see_value read
+// these, and everything else that counts material in exchange terms keeps
+// SEE_VALUE (see.h), which they start equal to. The pawn stays at 100: it
+// is the unit of every threshold above, and ProbCut compares an exchange
+// with the eval. The hand-written values of 09-26 (320, 330, 500, 900)
+// until 3.1's focused tune, which tuned them with the thresholds they meet.
+// Swapped in alone, without those thresholds, other values can lose:
+// FunHouse's network ratios scored -5.2 +- 7.2 Elo and shrank its tree 44%.
+inline FUNCOMP_PARAM int see_piece_value[6] = {100, 303, 326, 514, 886, 0};
 // Static exchanges value promotions (1): the promoting move gains the new
 // piece less the pawn, and the new piece is what can be taken back; a pawn
 // recapturing on the last rank promotes (to a queen) too. 0 treats every
 // promotion as winning exactly 0. Accepted as a correctness fix (flat:
 // -0.6 +- 8.0 Elo, 3424 games).
-inline int see_promo = 1;
+inline FUNCOMP_PARAM int see_promo = 1;
 // A capture's SEE pruning threshold is shifted by its capture history *
 // see_capt_hist_mult / 65536 centipawns (at most see_capture_margin * depth
 // either way): a capture that has often worked may lose more on paper. 0
 // turns the shift off. On since the 2.0 tune; alone, at 2048 (1/32) it tested flat (-0.8
 // +- 6.4 Elo, 5510 games).
-inline int see_capt_hist_mult = 1007;
+inline FUNCOMP_PARAM int see_capt_hist_mult = 988;
 // Delta pruning in quiescence: skip a capture (not a check or promotion)
 // when the stand-pat score plus the captured piece plus qs_delta_margin
 // is still at most alpha. 32000 turns it off. On since the 2.0 tune; alone, at 200 it
 // tested marginal (+2.6 +- 6.4 Elo, LOS 78.5%, 5546 games).
-inline int qs_delta_margin = 682;
+inline FUNCOMP_PARAM int qs_delta_margin = 693;
 // In check, quiescence searches at most qs_quiet_evasions quiet evasions
 // once a score that isn't mated is known (captures always). 256 turns
 // the limit off.
-inline int qs_quiet_evasions = 2;
+inline FUNCOMP_PARAM int qs_quiet_evasions = 2;
 
 // Late move reductions of quiet moves (and losing captures, see
 // lmr_captures), from depth lmr_min_depth and move index lmr_min_moves
@@ -506,26 +529,26 @@ inline int qs_quiet_evasions = 2;
 // than divisors, so that SPSA's steps have roughly even effects. Adjustment
 // terms (here and below) may be tuned below zero: SPSA may find that a term
 // wants the opposite sign, e.g. killers reduced more rather than less.
-inline int lmr_min_depth = 4;
-inline int lmr_min_moves = 1;
-inline int lmr_base = 138;
-inline int lmr_mult = 240181;  // in millionths (hand value 444444 = 1/2.25)
-inline int lmr_hist_mult = 11442;  // 1/1024 ply per 65536 of history (hand value 8192)
-inline int lmr_not_improving = 1143;
-inline int lmr_cut_node = 1190;
-inline int lmr_pv_node = 754;
-inline int lmr_killer = 2741;
+inline FUNCOMP_PARAM int lmr_min_depth = 4;
+inline FUNCOMP_PARAM int lmr_min_moves = 1;
+inline FUNCOMP_PARAM int lmr_base = 138;
+inline FUNCOMP_PARAM int lmr_mult = 240181;  // in millionths (hand value 444444 = 1/2.25)
+inline FUNCOMP_PARAM int lmr_hist_mult = 11442;  // 1/1024 ply per 65536 of history (hand value 8192)
+inline FUNCOMP_PARAM int lmr_not_improving = 1143;
+inline FUNCOMP_PARAM int lmr_cut_node = 1190;
+inline FUNCOMP_PARAM int lmr_pv_node = 754;
+inline FUNCOMP_PARAM int lmr_killer = 2741;
 // With a known threat (see StackEntry::threat): reduce moves that address
 // it lmr_threat_evade/1024 plies less, and moves that don't
 // lmr_threat_ignore/1024 more. On since the 2.0 tune; alone, with a ply each it tested
 // neutral (-2.8 +- 10.1 Elo); kept as the hand-made baseline for a learned
 // threat signal, and for SPSA.
-inline int lmr_threat_evade = 428;
-inline int lmr_threat_ignore = 1539;
+inline FUNCOMP_PARAM int lmr_threat_evade = 428;
+inline FUNCOMP_PARAM int lmr_threat_ignore = 1539;
 // Quiet moves that take a piece out of a static threat (attacked by a
 // cheaper piece) are reduced lmr_static_threat/1024 plies less. On since
 // the 2.0 tune; alone, at a ply it leaned negative (stopped early).
-inline int lmr_static_threat = 1320;
+inline FUNCOMP_PARAM int lmr_static_threat = 1320;
 // Quiet replies to a quiet move are reduced lmr_parent_hist/1024 plies less
 // when their quiet history is positive and the move they answer had a
 // negative one when it was chosen, and that much more the other way round.
@@ -534,16 +557,16 @@ inline int lmr_static_threat = 1320;
 // with the other statistics unchanged; left to the full SPSA pass, which
 // sees a gradient at 0 (both signs change the search). The second full
 // pass turned it on at 634 (0.6 ply), acting on about 73% of those moves.
-inline int lmr_parent_hist = 714;
+inline FUNCOMP_PARAM int lmr_parent_hist = 714;
 // Non-PV nodes whose hash entry says they were on the principal variation
 // (ttPv) are reduced lmr_tt_pv/1024 plies less: they may well return to it.
-inline int lmr_tt_pv = 565;
+inline FUNCOMP_PARAM int lmr_tt_pv = 565;
 // When the hash move is a capture, quiet moves are reduced
 // lmr_tt_capture/1024 plies more: the position's best line is likely
 // tactical, and a quiet move is unlikely to beat it. At one ply it tested
 // flat (-0.6 +- 6.5 Elo, 5558 games); the LMR SPSA moved it from 0 to 43,
 // the 2.0 tune further.
-inline int lmr_tt_capture = 1132;
+inline FUNCOMP_PARAM int lmr_tt_capture = 1132;
 // After a reduced search fails high, the full re-search goes a ply deeper
 // when it landed more than lmr_deeper_base + lmr_deeper_mult * reduction
 // centipawns above alpha, and a ply shallower when it beat the best
@@ -555,15 +578,15 @@ inline int lmr_tt_capture = 1132;
 // nearly off at 300, left it there (296): rare, for huge swings only. The
 // second full pass took it to 175 + 14r and turned the shallower re-search
 // on at 13.
-inline int lmr_deeper_base = 256;
-inline int lmr_deeper_mult = 16;
-inline int lmr_shallower = 22;
+inline FUNCOMP_PARAM int lmr_deeper_base = 256;
+inline FUNCOMP_PARAM int lmr_deeper_mult = 16;
+inline FUNCOMP_PARAM int lmr_shallower = 22;
 // Child cutoffs: once lmr_child_cutoffs of a node's children have failed
 // high in their own move loops (refuted by a searched move, not by the hash
 // table or a static test), the node's later moves look likely to be refuted
 // too: they are reduced lmr_child_cutoff_add/1024 plies more. 0 turns it off.
-inline int lmr_child_cutoffs = 0;
-inline int lmr_child_cutoff_add = 562;
+inline FUNCOMP_PARAM int lmr_child_cutoffs = 0;
+inline FUNCOMP_PARAM int lmr_child_cutoff_add = 562;
 // Hindsight depth: at a node its parent reduced by at least hindsight_red
 // plies, the static evals of the two say how the parent's move turned out.
 // Their sum (each from its own side) is what the move cost its side by
@@ -571,30 +594,35 @@ inline int lmr_child_cutoff_add = 562;
 // reduction assumed, and the node gets a ply back; more than
 // hindsight_margin, the move looks as bad as assumed, and the node loses a
 // ply (from depth 2 up). 0 turns it off.
-inline int hindsight_red = 2;
-inline int hindsight_margin = 74;
+inline FUNCOMP_PARAM int hindsight_red = 2;
+inline FUNCOMP_PARAM int hindsight_margin = 74;
 // Captures that lose material by static exchange (and neither check nor
 // promote) are reduced like quiet moves when lmr_captures is 1, with
 // lmr_bad_capture/1024 plies more (their history terms are zero). Other
 // captures are never reduced. With the offset at 0 it tested flat (-0.9
 // +- 6.5 Elo, 5514 games); the LMR SPSA (run with it on) set the offset to
 // -574, just over half a ply less than a quiet move.
-inline int lmr_captures = 1;
-inline int lmr_bad_capture = -1928;
+inline FUNCOMP_PARAM int lmr_captures = 1;
+inline FUNCOMP_PARAM int lmr_bad_capture = -1878;
 
 // Clamps on a learned guide's output (see pruning.h). Margins may move by
 // guide_margin_pct percent of the hand value, but at least guide_margin_min
 // centipawns; reductions by guide_reduction_delta plies; the late-move
 // pruning count by guide_margin_pct percent (at least one move). Not
 // tunables: they bound a model, they don't play chess.
-inline int guide_margin_pct = 50;
-inline int guide_margin_min = 50;
-inline int guide_reduction_delta = 2;
+inline FUNCOMP_PARAM int guide_margin_pct = 50;
+inline FUNCOMP_PARAM int guide_margin_min = 50;
+inline FUNCOMP_PARAM int guide_reduction_delta = 2;
 
+// A parameter by its UCI name. `set` is null where this build has it as a
+// constant: the constructor taking a pointer to const is the one chosen.
 struct Tunable {
     const char* name;
-    int* value;
+    const int* value;
+    int* set;
     int min, max;
+    Tunable(const char* n, int* v, int lo, int hi) : name(n), value(v), set(v), min(lo), max(hi) {}
+    Tunable(const char* n, const int* v, int lo, int hi) : name(n), value(v), set(nullptr), min(lo), max(hi) {}
 };
 
 inline const std::vector<Tunable>& tunables() {
@@ -731,6 +759,10 @@ inline const std::vector<Tunable>& tunables() {
         {"SeeCaptureMargin", &see_capture_margin, 0, 400},
         {"SeeQuietMargin", &see_quiet_margin, 0, 200},
         {"QsSeeThreshold", &qs_see_threshold, -500, 200},
+        {"SeeKnight", &see_piece_value[1], 200, 500},
+        {"SeeBishop", &see_piece_value[2], 200, 500},
+        {"SeeRook", &see_piece_value[3], 350, 900},
+        {"SeeQueen", &see_piece_value[4], 600, 1600},
         {"SeePromo", &see_promo, 0, 1},
         {"SeeCaptHistMult", &see_capt_hist_mult, 0, 8192},
         {"QsDeltaMargin", &qs_delta_margin, 0, 32000},
@@ -758,7 +790,7 @@ inline const std::vector<Tunable>& tunables() {
         {"HindsightRed", &hindsight_red, 0, 16},
         {"HindsightMargin", &hindsight_margin, 0, 1000},
         {"LmrCaptures", &lmr_captures, 0, 1},
-        {"LmrBadCapture", &lmr_bad_capture, -2048, 3072},
+        {"LmrBadCapture", &lmr_bad_capture, -4096, 3072},
     };
     return list;
 }

@@ -9,11 +9,17 @@
 
 // Piece values for exchanges, indexed by PieceType (king last, never
 // captured). Close to the search's ordering values rather than PeSTO's
-// tapered ones, so thresholds read as rough centipawns.
+// tapered ones, so thresholds read as rough centipawns. Fixed: material
+// counts, features and logs use these. The exchanges below count
+// params::see_piece_value instead, the search's tunable copy (equal to
+// these by default). Either way the least valuable attacker is found by
+// type, pawn to king, so the values should keep that order (a bishop
+// below the knight would have the knight spent first: slightly wrong,
+// never unsafe).
 inline constexpr int SEE_VALUE[6] = {100, 320, 330, 500, 900, 0};
 
 // True if the exchange started by `m` wins at least `threshold`
-// centipawns for the side making it. Castling and en passant are treated
+// centipawns (in params::see_piece_value) for the side making it. Castling and en passant are treated
 // as winning exactly 0; promotions too unless params::see_promo is set.
 bool see_at_least(const Position& pos, Move m, int threshold);
 

@@ -3,11 +3,12 @@
 A UCI chess engine written in C++23 from the ground up: a neural network
 evaluation (NNUE) trained only on FunComp's own games, and a modern
 alpha-beta search in which every feature was proven in games before it
-was kept, then tuned as a whole. Version 3.0 is estimated at about
-**3640 on the CCRL Blitz scale** (3642 ± 8 from a single-threaded
+was kept, then tuned as a whole. Version 3.1 is estimated at about
+**3660 on the CCRL Blitz scale** (3662 ± 8 from a single-threaded
 gauntlet of 2,000 games against 20 rated engines; an estimate on my
-hardware, not an official CCRL rating), about 360 above version 2.0.
-It searches with as many threads as you give it.
+hardware, not an official CCRL rating), about 20 above version 3.0.
+It searches with as many threads as you give it, on x86-64 and on
+64-bit ARM (Android).
 
 ## Features
 
@@ -16,17 +17,18 @@ It searches with as many threads as you give it.
 - **Evaluation:** an NNUE built into the executable: 768 piece-square
   inputs for each of 7 king buckets (by the king's square, mirrored so
   the king stands on the queen's side), a 1,024-wide hidden layer per
-  side, squared clipped ReLU, and 8 output buckets by material. The
-  hidden layer is updated incrementally with each move, and a cache of
+  side (clipped, its halves multiplied pairwise), then two small layers,
+  1,024 → 32 → 32 → 1, each chosen by one of 8 output buckets by material.
+  The hidden layer is updated incrementally with each move, and a cache of
   each king bucket's last accumulator spares a rebuild when the king
   changes bucket. Correction history (by pawn structure, by each side's
   non-pawn material, and by the previous move) learns during the search
   how far the static eval tends to be off and corrects it; scores shrink
   toward a draw as the fifty-move counter runs.
-- **Training:** the network learned from 1.44 billion positions of
-  FunComp's own self-play in three rounds, each labelled by FunComp's own
+- **Training:** the network learned from 4.7 billion positions of
+  FunComp's own self-play in five rounds, each labelled by FunComp's own
   search (the first with 2.0's hand-written evaluation, the later ones
-  with the previous round's network) and blended with the games' results.
+  with an earlier round's network) and blended with the games' results.
   Openings came from random plies, Chess324 starts, and positions
   from the Lichess open database (as starting positions only). No other
   engine's games, evaluations or networks were used.
@@ -72,7 +74,8 @@ Every change was tested in games (an SPRT against the previous best
 version) before it was kept. For 2.0, all of the search's parameters
 (about 110) were then tuned together by SPSA in two full passes, and the
 time management in a pass of its own; for 3.0 the search was tuned again
-for the network (2,000 iterations, 108 parameters). Ideas that did not pay
+for the network (2,000 iterations, 108 parameters), and for 3.1 the
+margins nearest the evaluation for the new one. Ideas that did not pay
 are still in the code, switched off. Every margin
 and threshold lives in `src/params.h`, and the search reaches them through
 `src/pruning.h`, which is built so that a learned model can later guide
@@ -82,11 +85,16 @@ the pruning (see "Learned pruning" below).
 
 FunComp speaks UCI: load it in any UCI GUI (Arena, Cute Chess, BanksiaGUI,
 En Croissant, ...) or match runner (fastchess, cutechess-cli). The release
-has two Windows binaries, each with the network inside:
+has two Windows binaries and two for Android, each with the network
+inside:
 
-- `funcomp-3.0-x86-64-v3.exe` for CPUs with AVX2 and BMI2 (Intel
+- `funcomp-3.1-x86-64-v3.exe` for CPUs with AVX2 and BMI2 (Intel
   Haswell, AMD Zen and later): the faster one;
-- `funcomp-3.0-x86-64.exe` for any 64-bit x86 CPU.
+- `funcomp-3.1-x86-64.exe` for any 64-bit x86 CPU;
+- `funcomp-3.1-android-armv8-dotprod` for 64-bit ARM CPUs with the dot
+  product instructions (most phones since about 2018): the faster one;
+- `funcomp-3.1-android-armv8` for any 64-bit ARM CPU (Android 7 or
+  later).
 
 Options:
 
@@ -145,8 +153,9 @@ telemetry in=<pgn> [positions=N nodes=N verify=N minply=N seed=N]
                       on positions sampled from the games of a PGN file
 ```
 
-The bench node count is the search's signature (1187868 for 3.0 with its
-network; 1614718 for 2.0): a
+The bench node count is the search's signature (1031103 for 3.1 with its
+network on x86-64-v3 and ARM, 1094101 on x86-64 and x86-64-v2; 1187868
+for 3.0; 1614718 for 2.0): a
 change meant to alter the search changes it, and a refactor or speedup
 must not.
 
@@ -164,7 +173,9 @@ ctest --test-dir build --output-on-failure
 For builds that run on other machines, `-DARCH=` sets the CPU level:
 `x86-64-v2` (the default) needs POPCNT and SSE4.2, which every x86-64
 CPU since about 2009 has; `x86-64-v3` needs AVX2 and BMI2 and is
-faster. All search identically (same bench). `-DARCH=x86-64` runs on
+faster. The network's later layers run in plain C++ on `x86-64` and
+`x86-64-v2`, which rounds them differently, so those builds have their
+own bench count (`BENCH_NODES_EMBEDDED_PLAIN`). `-DARCH=x86-64` runs on
 any 64-bit x86 CPU but is about 5% slower, having no popcount
 instruction; `-DNATIVE=ON` targets the build machine.
 
@@ -173,7 +184,12 @@ cmake -S . -B build-v2 -DARCH=x86-64-v2
 cmake -S . -B build-v3 -DARCH=x86-64-v3
 ```
 
-The network `nets/funcomp-3.0.nnue` is compiled into the executable;
+On 64-bit ARM, `-DARCH=armv8-a` or `-DARCH=armv8.2-a+dotprod` (NEON,
+with the int8 dot product); these search exactly as `x86-64-v3`.
+`tools/release-android.sh` builds both for Android with the NDK (and
+checks their bench under qemu when given one).
+
+The network `nets/funcomp-3.1.nnue` is compiled into the executable;
 `-DEMBED_NET=<file>` embeds another, `-DEMBED_NET=` none (then only
 `EvalFile` loads one).
 
@@ -338,7 +354,10 @@ decades of published work by the chess-programming community.
   Wiki.
 - **NNUE.** The efficiently updatable network was invented by Yu Nasu
   for shogi; Stockfish brought it to chess, and its use there influenced
-  FunComp's. FunComp's network, its features, its data and its inference
+  FunComp's (3.1's later layers among them: multiplying the hidden
+  layer's halves pairwise, and skipping its zero blocks in the first
+  small layer, with the hidden neurons reordered so that more blocks are
+  zero). FunComp's network, its features, its data and its inference
   code are its own. The trainer is built on bullet by Jamie Whiting (MIT
   licence). Starting positions for some training games came from the
   Lichess open database (CC0); others are Chess324, Larry Kaufman's

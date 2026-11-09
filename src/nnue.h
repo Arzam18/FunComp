@@ -38,9 +38,10 @@
 //           king square in its side's view); version 2 adds u32 extra
 //           feature sets (bit 0: the pawn predicates of pawn_features.h;
 //           bits 1-3 and 8: the knight pairs, slider pairs, slider x
-//           pawn and connected pairs of pair_features.h; bits 4-7 and 9:
-//           threats, square control and the piece-dependent pawn
-//           predicates of square_features.h, bit 10 their control counts,
+//           pawn and connected pairs of pair_features.h; bit 4 retired
+//           (the threat family: refused); bits 5-7 and 9: square control
+//           and the piece-dependent pawn predicates of
+//           square_features.h, bit 10 their control counts,
 //           bit 15 mobility;
 //           bit 11: the pawn-control map of pawn_features.h, after the
 //           predicates, cached with them; bit 17: passed-pawn quality,
@@ -63,7 +64,7 @@
 // layer is cached by pawn key and added at evaluation, not kept in the
 // accumulators.
 //
-// With pair, threat or square-control families, their inputs follow (one
+// With pair or square-control families, their inputs follow (one
 // block shared by every king bucket: the families in pair_features.h's,
 // then square_features.h's order and numbering, in the view's orientation
 // and mirroring). Each accumulator keeps its views' active extra inputs;
@@ -83,7 +84,7 @@ inline constexpr int INPUTS = 768;
 inline constexpr int MAX_KING_BUCKETS = 32;
 inline constexpr int MAX_OUTPUT_BUCKETS = 32;  // 8 material x 3 king states + 3 endgame types fits
 inline constexpr int HEADER_BYTES = 76;     // version 1; versions 2 and 3 add 4 and 8
-inline constexpr int MAX_EXTRA_INPUTS = 1836;  // pairfeat::MAX_ACTIVE + sqfeat::MAX_ACTIVE
+inline constexpr int MAX_EXTRA_INPUTS = 1580;  // pairfeat::MAX_ACTIVE + sqfeat::MAX_ACTIVE
 inline constexpr std::uint32_t PAWN_SPANS_BIT = 2048;  // header feature set: the pawn-control map
 // Header feature sets: the first layer's block chosen by the king's state
 // (KING_STATES of them, nnue.cpp's king_state(): location, castling
@@ -214,7 +215,7 @@ struct RefreshCache {
 // From scratch, from the board.
 void refresh(const Position& pos, Accumulator& acc);
 // `to` = `from` with one move's piece changes applied.
-void update(const Accumulator& from, Accumulator& to, const DirtyPieces& dirty);
+void update(const Accumulator& from, Accumulator& to, const MoveChanges& changes);
 // The network's evaluation in centipawns, from the side to move's view;
 // rebuilds stale views first, from `pos` (the position `acc` describes),
 // through `cache` when given.

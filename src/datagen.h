@@ -63,7 +63,9 @@ enum : std::uint8_t {
 // score is the last completed iteration's, fifty-move scaling included;
 // move is the move played (the search's best move). static_eval and
 // correction are what the search's root started from (NO_EVAL in check);
-// qs_score is a quiescence search after it.
+// qs_score is a quiescence search after it: through round 4 with the hash
+// sharpening its stand-pats (so about the search's own score: not a quiet
+// test), from round 5 plain (the captures alone; Searcher::quiescence).
 struct DataRecord {
     std::uint16_t move = 0;
     std::int16_t score = 0;
@@ -148,6 +150,10 @@ struct DataOptions {
     std::uint64_t soft_nodes = 10000;
     std::uint64_t hard_nodes = 40000;
     bool soft_scale = false;          // the soft limit scaled by stability (SearchLimits::soft_scale)
+    // No soft stop before this depth (SearchLimits::min_depth; round 5b, the
+    // author 2026-10-25: 2,000 soft, 20,000 hard, depth 9); hard_nodes still
+    // stops it. Not for the positions below at the drop budget. 0 = none.
+    int min_depth = 0;
     // Positions the export drops whatever their search finds (in check; a
     // tablebase root the tables call won or lost, which scores as decisive)
     // are searched with these limits instead when drop_soft_nodes is set
@@ -265,6 +271,21 @@ std::uint64_t label_pgn(const LabelPgnOptions& opt, std::ostream& log);
 // game replays. Results, endings and filtered stubs stay as they were.
 // Never overwrites: the output must not exist; `<out>.params` records the
 // source, the engine, the network and the budget. Returns the games written.
+//
+// Rolled labels (the author, 2026-10-21: "roll backwards down the tree to pull
+// the additional findings down"): with `roll` (soft nodes per step, e.g.
+// 1000,1000,1000), each position's search (the tip) is followed by searches
+// of the positions before it, one ply at a time (the last but one with the
+// first budget, ...), the table as the tip left it: each finds its successor
+// fresh in the table, so what the tip found travels down the played line, and
+// a position's label is its last such search's. With `back_pass`, after the
+// game a backward pass as gendata's (last position first, the table as the
+// game left it) overwrites the labels (today's design, for comparison). With
+// either, records are written as version 4: the main fields (score, best,
+// depth) are the final label, `nodes` everything spent on the position, and
+// the backward fields hold the tip's own search (score, best move, depth,
+// nodes): one file carries both labels (`datatext label=back` exports the
+// tip's). In check, tablebase wins and losses keep the tip's label.
 struct RescoreOptions {
     std::string in, out;
     std::uint64_t soft_nodes = 6000;  // round 3's budget
@@ -272,6 +293,8 @@ struct RescoreOptions {
     bool soft_scale = true;
     int hash_mb = 4;
     std::uint64_t games = 0;  // 0 = all
+    std::vector<std::uint64_t> roll;  // the roll's soft nodes, nearest position first (hard: 8 times)
+    std::uint64_t back_pass = 0;      // an after-game backward pass's soft nodes (hard: 8 times); 0 none
 };
 std::uint64_t rescore_data(const RescoreOptions& opt, std::ostream& log);
 
@@ -286,7 +309,7 @@ std::uint64_t nnue_eval_data(const std::string& in, std::uint64_t max_positions,
                              bool fen = false);
 
 // "datadump": one line per searched position (FEN and every column).
-void dump_data(const std::string& path, std::uint64_t max_games, std::ostream& out);
+void dump_data(const std::string& path, std::uint64_t max_games, std::ostream& out, bool back = false);  // back: the backward pass's score, depth and nodes appended, then both searches' best moves
 // A data file, or every .bin file in a directory, sorted; empty if neither.
 std::vector<std::string> data_files(const std::string& path);
 
@@ -337,6 +360,25 @@ struct ShuffleOptions {
 };
 std::uint64_t shuffle_data(const ShuffleOptions& opt, std::ostream& log);
 
+// "relabel" (round 6's distillation, the author, 2026-10-27: "a straight up
+// relabel with 3.1's net"; ROADMAP, Round 6): a training file's records
+// (the trainer's 32 bytes: bulletformat's ChessBoard, the board from the
+// side to move's view, flipped when Black is to move) copied with each score
+// replaced by the loaded network's static evaluation of its position at
+// NnueScale `scale`, clamped to int16. At 180, the trainer's scale,
+// sigmoid(score / 180) is the network's own prediction: train on it with
+// wdl 0, since the network already learned the game result's share. Every
+// other byte is the source's, so the positions, results and order are too.
+// Evaluating the flipped board with White to move is exact: the inputs are
+// each side's own view. Written as <out>.part and renamed when complete;
+// an existing output is never overwritten. Returns the records written (0
+// on any failure, said in the log).
+struct RelabelOptions {
+    std::string in, out;
+    int scale = 180;
+};
+std::uint64_t relabel_data(const RelabelOptions& opt, std::ostream& log);
+
 // "datatext": the training positions as text, one per line, for the
 // trainer's converter: "<FEN> | <score> | <result>", the score in
 // centipawns and the result (1.0, 0.5, 0.0) both from White's side. Played
@@ -351,10 +393,29 @@ std::uint64_t shuffle_data(const ShuffleOptions& opt, std::ostream& log);
 // Returns the number of lines written.
 struct TextOptions {
     bool quiet = true;
+    // The quiescence test (the author, 2026-10-20; ROADMAP, the data study's
+    // filter arm): with a searcher and a network, a position is left out when
+    // a plain quiescence search from its static eval (no hash: what the
+    // captures alone make of it) raises the score by more than this many
+    // centipawns. -1: off. Beside `quiet` (the best move) or instead of it.
+    int qs_quiet = -1;
     // The label (the author, 2026-10-19): the forward search's (false) or
     // the backward pass's (true: version 4 records searched backward only;
     // its best move then decides the quiet filter).
     bool backward = false;
+    // The backed-up label (the author, 2026-10-22: "search the played move
+    // only one more ply", in its limit no search at all): the forward score
+    // averaged with the next positions' scores from the same side, weight
+    // td_lambda^j for the j-th position on (j = 1 .. td_plies), while every
+    // move on the way was the search's own (a rescore's or castlelong's other
+    // moves end the chain) and the scores stay under td_cap as searched (a
+    // mate ends it too); each score unscaled for the fifty-move rule at its own
+    // position first. 0: off. The roll screen (results.md, 10-22): 0.7 over up
+    // to 4 plies as near a depth-18 search as about a 1.8x budget, for
+    // nothing; past 4 plies the label leans on the game's outcome.
+    double td_lambda = 0;
+    int td_plies = 4;
+    int td_cap = 1000;
     bool unscale = true;
     struct Thin {
         int threshold;  // |score| in centipawns, after unscaling
@@ -410,8 +471,10 @@ struct TextOptions {
     // (0: off).
     int castle_clean = 0;
 };
+class Searcher;
+// `searcher` (with its network loaded) only for qs_quiet.
 std::uint64_t data_text(const std::string& in, std::ostream& out, const TextOptions& opt,
-                        std::ostream& log);
+                        std::ostream& log, Searcher* searcher = nullptr);
 
 // The slices of a data set by how a game was made (datatext drop=): its
 // start, from the standard position with random plies, a Chess324

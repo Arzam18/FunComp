@@ -150,7 +150,7 @@ void write_params(const DataOptions& opt, std::uint32_t first_index) {
         << "git=" << GIT_HASH << "\nworker=" << opt.worker << "\nseed=" << opt.seed
         << "\nhours=" << opt.hours << "\ngames=" << opt.games << "\nsoftnodes=" << opt.soft_nodes
         << "\nhardnodes=" << opt.hard_nodes << "\nsoftscale=" << opt.soft_scale
-        << "\ndropsoftnodes=" << opt.drop_soft_nodes << "\ndrophardnodes=" << opt.drop_hard_nodes
+        << "\nmindepth=" << opt.min_depth << "\ndropsoftnodes=" << opt.drop_soft_nodes << "\ndrophardnodes=" << opt.drop_hard_nodes
         << "\nbacksoftnodes=" << opt.back_soft_nodes << "\nbackhardnodes=" << opt.back_hard_nodes
         << "\nbingoevery=" << opt.bingo_every
         << "\nrandomplies=" << opt.random_min << '-' << opt.random_max
@@ -394,7 +394,7 @@ bool Adjudicator::update(int white_score, int phase, int ply, int tb_white, Data
 static DataRecord search_record(Searcher& s, Position& pos, const std::vector<std::uint64_t>& keys,
                                 std::uint64_t soft_nodes, std::uint64_t hard_nodes, Move& best, int& score,
                                 int& tb, bool soft_scale = false, std::uint64_t drop_soft = 0,
-                                std::uint64_t drop_hard = 0, bool* cheap = nullptr) {
+                                std::uint64_t drop_hard = 0, bool* cheap = nullptr, int min_depth = 0) {
     const bool in_check = pos.in_check(pos.side_to_move());
     DataRecord r;
     const EvalParts parts = eval_parts(pos);
@@ -403,12 +403,14 @@ static DataRecord search_record(Searcher& s, Position& pos, const std::vector<st
     limits.nodes = hard_nodes;
     limits.soft_nodes = soft_nodes;
     limits.soft_scale = soft_scale;
+    limits.min_depth = min_depth;
     // A position the export will drop whatever the search finds gets the
-    // cheaper budget (DataOptions::drop_soft_nodes).
+    // cheaper budget (DataOptions::drop_soft_nodes), and no depth floor.
     if (drop_soft) {
         const int verdict = in_check ? Searcher::NO_EVAL : s.tablebase_verdict(pos, limits);
         if (in_check || (verdict != Searcher::NO_EVAL && verdict != 0)) {
             limits.soft_nodes = drop_soft;
+            limits.min_depth = 0;
             if (drop_hard) limits.nodes = drop_hard;
             if (cheap) *cheap = true;
         }
@@ -444,7 +446,7 @@ static DataRecord search_record(Searcher& s, Position& pos, const std::vector<st
     r.drawish_pct = static_cast<std::uint8_t>(std::clamp(parts.drawish_pct, 0, 255));
     r.static_eval = to_i16(root.static_eval);
     r.correction = to_i16(root.correction);
-    r.qs_score = to_i16(s.quiescence(pos, keys));
+    r.qs_score = to_i16(s.quiescence(pos, keys, true));  // plain: the captures alone, not the search just made (round 5 on)
     return r;
 }
 
@@ -658,7 +660,8 @@ std::uint64_t generate_data(const DataOptions& opt, std::ostream& log) {
                 searched_keys.push_back(keys.size());
             }
             const DataRecord r = search_record(s, pos, keys, opt.soft_nodes, opt.hard_nodes, best, score, tb,
-                                               opt.soft_scale, opt.drop_soft_nodes, opt.drop_hard_nodes, &cheap);
+                                               opt.soft_scale, opt.drop_soft_nodes, opt.drop_hard_nodes, &cheap,
+                                               opt.min_depth);
             g.records.push_back(r);
             cheap_searches += cheap;
             forward_nodes += r.nodes;
@@ -879,7 +882,7 @@ std::uint64_t nnue_eval_data(const std::string& in, std::uint64_t max_positions,
     return written;
 }
 
-void dump_data(const std::string& path, std::uint64_t max_games, std::ostream& out) {
+void dump_data(const std::string& path, std::uint64_t max_games, std::ostream& out, bool back) {
     std::ifstream in(path, std::ios::binary);
     DataGame g;
     for (std::uint64_t n = 0; (!max_games || n < max_games) && read_game(in, g); ++n) {
@@ -899,7 +902,8 @@ void dump_data(const std::string& path, std::uint64_t max_games, std::ostream& o
         }
         out << '\n'
             << "# fen | move score flags depth seldepth nodes tbhits pesto initiative mopup "
-               "drawish static_eval correction qs\n";
+               "drawish static_eval correction qs" << (back ? " back_score back_depth back_nodes best back_best" : "")
+            << '\n';
         for (const DataRecord& r : g.records) {
             Move m;
             m.data = r.move;
@@ -908,7 +912,18 @@ void dump_data(const std::string& path, std::uint64_t max_games, std::ostream& o
                 << static_cast<int>(r.seldepth) << ' ' << r.nodes << ' ' << r.tb_hits << ' '
                 << r.pesto << ' ' << r.initiative << ' ' << r.mop_up << ' '
                 << static_cast<int>(r.drawish_pct) << ' ' << r.static_eval << ' ' << r.correction
-                << ' ' << r.qs_score << '\n';
+                << ' ' << r.qs_score;
+            if (back) {
+                // The searches' own best moves (a rescore's may differ from the move played); "-" none.
+                auto uci = [&](std::uint16_t d) {
+                    Move b;
+                    b.data = d;
+                    return d ? pos.move_to_uci(b) : std::string("-");
+                };
+                out << ' ' << r.back_score << ' ' << static_cast<int>(r.back_depth) << ' ' << r.back_nodes << ' '
+                    << uci(r.best) << ' ' << uci(r.back_best);
+            }
+            out << '\n';
             if (&r == &g.records.back() && g.end == DataEnd::Filtered) break;
             if (!is_legal_move(pos, m)) {
                 out << "# error: illegal move\n";
@@ -1360,6 +1375,112 @@ std::uint64_t shuffle_data(const ShuffleOptions& opt, std::ostream& log) {
     return n;
 }
 
+std::uint64_t relabel_data(const RelabelOptions& opt, std::ostream& log) {
+    namespace fs = std::filesystem;
+    const auto start = std::chrono::steady_clock::now();
+    constexpr std::uint64_t REC = 32;
+    const std::string part = opt.out + ".part";
+    const auto fail = [&](const std::string& why) {
+        std::error_code ec;
+        fs::remove(part, ec);
+        log << "info string relabel: " << why << "; nothing written" << std::endl;
+        return std::uint64_t{0};
+    };
+    if (!nnue::active()) return fail("no network loaded (EvalFile)");
+    std::error_code ec;
+    const std::uint64_t size = fs::file_size(opt.in, ec);
+    if (ec) return fail("no file " + opt.in);
+    if (size % REC) return fail(opt.in + " is not a whole number of 32-byte records");
+    if (opt.out.empty() || fs::exists(opt.out)) return fail("the output " + opt.out + " exists (never overwritten)");
+    std::FILE* in = std::fopen(opt.in.c_str(), "rb");
+    std::FILE* out = std::fopen(part.c_str(), "wb");
+    if (!in || !out) {
+        if (in) std::fclose(in);
+        if (out) std::fclose(out);
+        return fail("cannot read " + opt.in + " or write " + part);
+    }
+    const int saved_scale = params::nnue_scale;
+    params::nnue_scale = opt.scale;
+    // ChessBoard: occupancy (u64), then a nibble a piece in square order (bit 3 the side not to move, bits 0-2
+    // the type, pawn to king), the score (i16, side to move's), the result, the king squares and 3 spare bytes.
+    static constexpr char PIECE_CHARS[2][6] = {{'P', 'N', 'B', 'R', 'Q', 'K'}, {'p', 'n', 'b', 'r', 'q', 'k'}};
+    std::vector<unsigned char> block(REC * 65536);
+    std::uint64_t written = 0, kept = 0, signed_pairs = 0, same_sign = 0;
+    bool ok = true;
+    Position pos;
+    std::string fen;
+    for (std::size_t got; ok && (got = std::fread(block.data(), 1, block.size(), in)) > 0;) {
+        if (got % REC) {
+            ok = false;
+            break;
+        }
+        for (std::size_t at = 0; at < got; at += REC) {
+            unsigned char* r = block.data() + at;
+            std::uint64_t occ;
+            std::memcpy(&occ, r, 8);  // little-endian, as bullet writes it
+            char board[64] = {};
+            int kings[2] = {0, 0};
+            bool valid = std::popcount(occ) <= 32;
+            int idx = 0;
+            for (Bitboard b = occ; b && valid; b &= b - 1, ++idx) {
+                const int pc = (r[8 + idx / 2] >> (4 * (idx & 1))) & 0xF;
+                const int side = pc >> 3, type = pc & 7;
+                valid = type <= 5;
+                if (!valid) break;
+                kings[side] += type == 5;
+                board[std::countr_zero(b)] = PIECE_CHARS[side][type];
+            }
+            fen.clear();
+            for (int rank = 7; rank >= 0 && valid; --rank) {
+                int empty = 0;
+                for (int file = 0; file < 8; ++file) {
+                    const char c = board[rank * 8 + file];
+                    if (!c) {
+                        ++empty;
+                        continue;
+                    }
+                    if (empty) fen += static_cast<char>('0' + empty);
+                    empty = 0;
+                    fen += c;
+                }
+                if (empty) fen += static_cast<char>('0' + empty);
+                if (rank) fen += '/';
+            }
+            fen += " w - - 0 1";
+            // A record that isn't a position keeps its score: the positions stay the source's.
+            if (!valid || kings[0] != 1 || kings[1] != 1 || !pos.set_fen(fen)) {
+                ++kept;
+                continue;
+            }
+            std::int16_t old_score;
+            std::memcpy(&old_score, r + 24, 2);
+            const auto score = static_cast<std::int16_t>(std::clamp(nnue::evaluate(pos), -32767, 32767));
+            std::memcpy(r + 24, &score, 2);
+            if (old_score != 0 && score != 0) {
+                ++signed_pairs;
+                same_sign += (old_score > 0) == (score > 0);
+            }
+        }
+        ok = std::fwrite(block.data(), 1, got, out) == got;
+        written += got / REC;
+    }
+    params::nnue_scale = saved_scale;
+    std::fclose(in);
+    if (std::fclose(out) != 0) ok = false;
+    if (!ok || written != size / REC)
+        return fail("a read or a write failed (the disk full?) after " + std::to_string(written) + " of " +
+                    std::to_string(size / REC) + " records");
+    fs::rename(part, opt.out, ec);
+    if (ec) return fail("cannot rename " + part + " to " + opt.out);
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    log << "info string relabel: " << written << " records, " << kept << " kept as they were (not a position); "
+        << "the new score's sign the old one's in " << std::fixed << std::setprecision(1)
+        << (signed_pairs ? 100.0 * static_cast<double>(same_sign) / static_cast<double>(signed_pairs) : 0.0)
+        << "%; NnueScale " << opt.scale << ", "
+        << std::setprecision(0) << secs << " s, to " << opt.out << std::endl;
+    return written;
+}
+
 std::uint64_t rescore_data(const RescoreOptions& opt, std::ostream& log) {
     if (std::filesystem::exists(opt.out)) {
         log << "info string rescore: " << opt.out << " exists: never overwritten" << std::endl;
@@ -1371,20 +1492,46 @@ std::uint64_t rescore_data(const RescoreOptions& opt, std::ostream& log) {
         log << "info string rescore: cannot read " << opt.in << " or write " << opt.out << std::endl;
         return 0;
     }
+    const bool two_labels = !opt.roll.empty() || opt.back_pass;  // the final label and the tip's (version 4)
     {
         const std::time_t now = std::time(nullptr);
         std::ofstream p(opt.out + ".params");
         p << "# rescore\nsource=" << opt.in << "\ngit=" << GIT_HASH << "\nnet=" << nnue::loaded_path()
           << "\nsoftnodes=" << opt.soft_nodes << "\nhardnodes=" << opt.hard_nodes << "\nsoftscale=" << opt.soft_scale
-          << "\nhash=" << opt.hash_mb << "\ndate=" << std::put_time(std::gmtime(&now), "%Y-%m-%d %H:%M UTC")
-          << "\nformat_version=" << FORWARD_VERSION << "\n# search parameters\n";
+          << "\nhash=" << opt.hash_mb << "\nroll=";
+        for (std::size_t k = 0; k < opt.roll.size(); ++k) p << (k ? "," : "") << opt.roll[k];
+        p << "\nbackpass=" << opt.back_pass << "\ndate=" << std::put_time(std::gmtime(&now), "%Y-%m-%d %H:%M UTC")
+          << "\nformat_version=" << (two_labels ? BACKWARD_VERSION : FORWARD_VERSION) << "\n# search parameters\n";
         for (const auto& t : params::tunables()) p << t.name << '=' << *t.value << '\n';
     }
     Searcher s(static_cast<std::size_t>(opt.hash_mb));
     std::uint64_t games = 0, positions = 0, stubs = 0;
+    std::uint64_t tip_nodes = 0, roll_nodes = 0, roll_searches = 0, back_nodes = 0, back_searches = 0;
+    // A later search of a record's position overwrites its label (the roll's and the backward pass's), adding its
+    // nodes to the record's.
+    auto relabel = [&](DataRecord& r, const std::string& fen, const std::vector<std::uint64_t>& keys,
+                       std::size_t key_count, std::uint64_t soft) {
+        Position q;
+        q.set_fen(fen);
+        const std::vector<std::uint64_t> history(keys.begin(), keys.begin() + static_cast<std::ptrdiff_t>(key_count));
+        SearchLimits limits;
+        limits.soft_nodes = soft;
+        limits.nodes = 8 * soft;
+        limits.soft_scale = opt.soft_scale;
+        const Move b = s.search(q, limits, history, false);
+        r.score = to_i16(s.last_score());
+        r.best = b.data;
+        r.depth = static_cast<std::uint8_t>(
+            std::clamp(s.iterations().empty() ? 1 : s.iterations().back().depth, 1, 255));
+        r.flags = static_cast<std::uint8_t>((r.flags & ~DF_MATE) |
+                                            (std::abs(s.last_score()) > Searcher::MATE_BOUND ? DF_MATE : 0));
+        r.nodes = static_cast<std::uint32_t>(std::min<std::uint64_t>(std::uint64_t{r.nodes} + s.nodes(), UINT32_MAX));
+        return s.nodes();
+    };
+    auto keeps_tip = [](const DataRecord& r) { return (r.flags & (DF_IN_CHECK | DF_TB_WIN | DF_TB_LOSS)) != 0; };
     DataGame g;
     while ((!opt.games || games < opt.games) && read_game(in, g)) {
-        g.version = FORWARD_VERSION;
+        g.version = two_labels ? BACKWARD_VERSION : FORWARD_VERSION;
         if (g.end == DataEnd::Filtered) {  // a stub: no game to replay
             write_game(out, g);
             ++games;
@@ -1402,7 +1549,10 @@ std::uint64_t rescore_data(const RescoreOptions& opt, std::ostream& log) {
         };
         for (const Move m : g.random_moves) play(m);
         s.new_game();
-        for (DataRecord& r : g.records) {
+        std::vector<std::string> fens;         // each record's position, for the roll and the backward pass
+        std::vector<std::size_t> key_counts;  // and its history's length
+        for (std::size_t i = 0; i < g.records.size(); ++i) {
+            DataRecord& r = g.records[i];
             Move played;
             played.data = r.move;
             if (!is_legal_move(pos, played)) {
@@ -1410,15 +1560,38 @@ std::uint64_t rescore_data(const RescoreOptions& opt, std::ostream& log) {
                     << pos.fen() << ": stopped" << std::endl;
                 return games;
             }
+            fens.push_back(pos.fen());
+            key_counts.push_back(keys.size());
             Move best;
             int score = 0, tb = Searcher::NO_EVAL;
             DataRecord nr = search_record(s, pos, keys, opt.soft_nodes, opt.hard_nodes, best, score, tb,
                                           opt.soft_scale);
             nr.best = best.data;
             nr.move = r.move;
+            tip_nodes += nr.nodes;
+            if (two_labels) {  // the tip's own label, kept beside the final one
+                nr.back_score = nr.score;
+                nr.back_best = nr.best;
+                nr.back_depth = nr.depth;
+                nr.back_nodes = nr.nodes;
+            }
             r = nr;
             ++positions;
+            // The roll: the positions before this one, nearest first, each finding its successor fresh.
+            for (std::size_t k = 1; k <= opt.roll.size() && k <= i; ++k) {
+                DataRecord& earlier = g.records[i - k];
+                if (keeps_tip(earlier)) continue;
+                roll_nodes += relabel(earlier, fens[i - k], keys, key_counts[i - k], opt.roll[k - 1]);
+                ++roll_searches;
+            }
             play(played);
+        }
+        if (opt.back_pass) {  // gendata's backward pass, for comparison: last position first
+            for (std::size_t i = g.records.size(); i-- > 0;) {
+                if (keeps_tip(g.records[i])) continue;
+                back_nodes += relabel(g.records[i], fens[i], keys, key_counts[i], opt.back_pass);
+                ++back_searches;
+            }
         }
         write_game(out, g);
         ++games;
@@ -1426,7 +1599,9 @@ std::uint64_t rescore_data(const RescoreOptions& opt, std::ostream& log) {
             log << "info string rescore: " << games << " games, " << positions << " positions" << std::endl;
     }
     log << "info string rescore: done, " << games << " games (" << stubs << " filtered stubs copied), "
-        << positions << " positions rescored" << std::endl;
+        << positions << " positions rescored; nodes: tips " << tip_nodes << ", roll " << roll_nodes << " in "
+        << roll_searches << " searches, backward pass " << back_nodes << " in " << back_searches << " searches"
+        << std::endl;
     return games;
 }
 
@@ -1458,12 +1633,19 @@ unsigned slice_bits(const std::string& names) {
 }
 
 std::uint64_t data_text(const std::string& in, std::ostream& out, const TextOptions& opt,
-                        std::ostream& log) {
+                        std::ostream& log, Searcher* searcher) {
     static constexpr const char* RESULT[3] = {"1.0", "0.5", "0.0"};  // by DataResult
     std::uint64_t written = 0, skipped = 0;
     // Why positions were left out, by the first filter each failed.
     std::uint64_t in_check = 0, decisive = 0, noisy_moves = 0, fifty = 0, thinned = 0, capped = 0, castle_window = 0;
+    std::uint64_t qs_moved = 0;  // qs_quiet: the captures raised the static eval by more than the margin
+    if (opt.qs_quiet >= 0 && !searcher) {
+        log << "info string datatext: qsquiet needs the engine's searcher" << std::endl;
+        return 0;
+    }
+    const std::vector<std::uint64_t> no_history;
     std::uint64_t no_backward = 0;  // with the backward label: records not searched backward
+    std::uint64_t td_backed = 0, td_reach = 0;  // backed-up labels: those with a chain, the plies they reached
     std::uint64_t draws_out = 0, games_out = 0, hard_extra = 0, sliced_out = 0, other_part = 0, unindexed = 0;
     const std::map<std::string, Cut> cuts = opt.part ? read_cuts(opt.index) : std::map<std::string, Cut>{};
     struct Kept {
@@ -1517,6 +1699,51 @@ std::uint64_t data_text(const std::string& in, std::ostream& out, const TextOpti
             std::vector<StateInfo> states(g.random_moves.size() + g.records.size() + 1);
             std::size_t made = 0;
             for (const Move m : g.random_moves) pos.make_move(m, states[made++]);
+            // The backed-up label's inputs (TextOptions::td_lambda): every record's score as the export
+            // reads it (unscaled for the fifty-move rule at its own position) and whether it may join a chain.
+            std::vector<double> td_score;
+            std::vector<char> td_ok;
+            if (opt.td_lambda > 0 && !opt.backward) {
+                Position q;
+                q.set_fen(g.fen);
+                std::vector<StateInfo> qstates(g.random_moves.size() + g.records.size() + 1);
+                std::size_t qmade = 0;
+                for (const Move m : g.random_moves) q.make_move(m, qstates[qmade++]);
+                const int fs = opt.fifty_scale ? opt.fifty_scale : params::fifty_scale;
+                for (const DataRecord& r : g.records) {
+                    long long s = r.score;
+                    bool ok = !(r.flags & DF_MATE) && std::abs(s) < opt.td_cap;
+                    if (opt.unscale && fs && q.halfmove_clock() > 0) {
+                        const int left = fs - q.halfmove_clock();
+                        if (2 * left >= fs)
+                            s = s * fs / left;
+                        else
+                            ok = false;
+                    }
+                    td_score.push_back(static_cast<double>(s));
+                    td_ok.push_back(ok);
+                    Move m;
+                    m.data = r.move;
+                    if (!is_legal_move(q, m)) break;
+                    q.make_move(m, qstates[qmade++]);
+                }
+            }
+            // Record ri's backed-up label from its own unscaled score.
+            const auto td_label = [&](std::size_t ri) {
+                double sum = td_score[ri], weights = 1, w = 1;
+                int reach = 0;
+                for (std::size_t j = 1; j <= static_cast<std::size_t>(opt.td_plies) && ri + j < td_score.size(); ++j) {
+                    const DataRecord& before = g.records[ri + j - 1];
+                    if ((before.best && before.best != before.move) || !td_ok[ri + j]) break;
+                    w *= opt.td_lambda;
+                    sum += w * (j % 2 ? -td_score[ri + j] : td_score[ri + j]);
+                    weights += w;
+                    ++reach;
+                }
+                td_reach += static_cast<std::uint64_t>(reach);
+                td_backed += reach > 0;
+                return sum / weights;
+            };
             for (std::size_t ri = 0; ri < g.records.size(); ++ri) {
                 const DataRecord& r = g.records[ri];
                 Move m;
@@ -1546,6 +1773,13 @@ std::uint64_t data_text(const std::string& in, std::ostream& out, const TextOpti
                 } else if (opt.quiet && noisy) {
                     keep = false;
                     ++noisy_moves;
+                } else if (opt.qs_quiet >= 0) {
+                    // What the side to move's captures alone make of the static eval (no hash, no search).
+                    const int stand = searcher->root_eval(pos).static_eval;
+                    if (searcher->quiescence(pos, no_history, true) - stand > opt.qs_quiet) {
+                        keep = false;
+                        ++qs_moved;
+                    }
                 }
                 const int fs = opt.fifty_scale ? opt.fifty_scale : params::fifty_scale;
                 const int left = fs - pos.halfmove_clock();
@@ -1557,6 +1791,7 @@ std::uint64_t data_text(const std::string& in, std::ostream& out, const TextOpti
                         ++fifty;
                     }
                 }
+                if (keep && ri < td_score.size()) score = std::llround(td_label(ri));  // unscaled already, as `score`
                 if (keep && opt.rescale != 1) score = std::llround(static_cast<double>(score) * opt.rescale);
                 if (keep) {
                     // Thinning: the highest threshold reached sets the rate.
@@ -1633,6 +1868,12 @@ std::uint64_t data_text(const std::string& in, std::ostream& out, const TextOpti
         << ", castling window " << castle_window << ", games of dropped slices " << sliced_out
         << ", games of the other part " << other_part << ", files without an index line " << unindexed;
     if (opt.backward) log << "; the backward label: records without one " << no_backward;
+    if (opt.td_lambda > 0 && !opt.backward)
+        log << "; backed up (lambda " << opt.td_lambda << ", up to " << opt.td_plies << " plies): " << td_backed
+            << " labels, " << std::fixed << std::setprecision(2)
+            << (td_backed ? static_cast<double>(td_reach) / static_cast<double>(td_backed) : 0.0)
+            << " plies on average" << std::defaultfloat;
+    if (opt.qs_quiet >= 0) log << "; not quiet by quiescence (margin " << opt.qs_quiet << ") " << qs_moved;
     log << std::endl;
     return written;
 }

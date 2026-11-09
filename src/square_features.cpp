@@ -10,43 +10,6 @@ namespace sqfeat {
 
 namespace {
 
-// A piece type's attacks from `square` on an empty board, for a side whose
-// pawns attack up the board (colour 0) or down (colour 1).
-Bitboard empty_reach(int colour, int type, int square) {
-    switch (type) {
-        case 0: return pawn_attack_set(colour == 0 ? Color::White : Color::Black, bit(square));
-        case 1: return knight_attacks(square);
-        case 2: return bishop_attacks(square, 0);
-        case 3: return rook_attacks(square, 0);
-        case 4: return queen_attacks(square, 0);
-        default: return king_attacks(square);
-    }
-}
-
-struct Tables {
-    std::array<std::array<std::array<int, 64>, 6>, 2> slot;
-    std::array<std::array<std::array<Bitboard, 64>, 6>, 2> reach;
-    Tables() {
-        int n = 0;
-        for (int c = 0; c < 2; ++c)
-            for (int t = 0; t < 6; ++t)
-                for (int s = 0; s < 64; ++s) {
-                    const auto [cc, tt, ss] = std::array<std::size_t, 3>{static_cast<std::size_t>(c),
-                                                                         static_cast<std::size_t>(t),
-                                                                         static_cast<std::size_t>(s)};
-                    slot[cc][tt][ss] = n;
-                    reach[cc][tt][ss] = empty_reach(c, t, s);
-                    n += std::popcount(reach[cc][tt][ss]);
-                }
-        if (n != THREAT_SLOTS) std::abort();
-    }
-};
-
-const Tables& tables() {
-    static const Tables t;
-    return t;
-}
-
 int own_square(Color view, int square) { return view == Color::White ? square : square ^ 56; }
 
 Piece piece_of(Color c, int type) { return static_cast<Piece>(piece_index(c, static_cast<PieceType>(type))); }
@@ -107,16 +70,8 @@ Bitboard pinned(const Position& pos, Color c) {
 
 }  // namespace
 
-int threat_slot(int colour, int type, int square) {
-    return tables().slot[static_cast<std::size_t>(colour)][static_cast<std::size_t>(type)][static_cast<std::size_t>(square)];
-}
-
-Bitboard threat_reach(int colour, int type, int square) {
-    return tables().reach[static_cast<std::size_t>(colour)][static_cast<std::size_t>(type)][static_cast<std::size_t>(square)];
-}
-
 int block_size(unsigned families) {
-    return (families & Threats ? THREAT_FEATURES : 0) + (families & Attacked ? ATTACKED_FEATURES : 0) +
+    return (families & Attacked ? ATTACKED_FEATURES : 0) +
            (families & LeastAttacker ? LEAST_ATTACKER_FEATURES : 0) + (families & KingZone ? KING_ZONE_FEATURES : 0) +
            (families & PawnPieces ? PAWN_PIECE_FEATURES : 0) +
            (families & ControlCounts ? CONTROL_COUNT_FEATURES : 0) + (families & Mobility ? MOBILITY_FEATURES : 0) +
@@ -137,28 +92,6 @@ int inputs(const Position& pos, unsigned families, Color view, int flip, std::ui
         if (full) n = first;
     };
     const Bitboard occ = pos.occupied();
-
-    if (families & Threats) {
-        family(THREAT_MAX, [&](auto&& add) {
-            for (int p = WP; p <= BK; ++p) {
-                const Color c = p < BP ? Color::White : Color::Black;
-                const int t = type_of(p), rc = static_cast<int>(c) != us;
-                for (Bitboard b = pos.pieces(static_cast<Piece>(p)); b; b &= b - 1) {
-                    const int a = std::countr_zero(b), va = sq(a);
-                    const int slot = threat_slot(rc, t, va);
-                    const Bitboard reach = threat_reach(rc, t, va);
-                    for (Bitboard m = piece_attacks(t, c, a, occ) & occ; m; m &= m - 1) {
-                        const int v = std::countr_zero(m);
-                        const Piece target = pos.piece_at(v);
-                        const int place = std::popcount(reach & (bit(sq(v)) - 1));
-                        const int rv = (target < BP ? 0 : 1) != us;
-                        add((slot + place) * 12 + rv * 6 + type_of(target));
-                    }
-                }
-            }
-        });
-        offset += THREAT_FEATURES;
-    }
 
     if (families & (Attacked | LeastAttacker | KingZone)) {
         std::array<std::array<Bitboard, 6>, 2> by;

@@ -34,7 +34,7 @@ public:
 
     // Recomputes from scratch; call at the root of every search.
     void reset(const Position& pos);
-    void push(const DirtyPieces& dirty);
+    void push(const MoveChanges& changes);
     void pop() { --top_; }
 
     // Same result as evaluate(pos) for the position the stack describes.
@@ -67,4 +67,6 @@ private:
     // nearly every node (ROADMAP 5d, 2026-10-06).
     mutable nnue::RefreshCache cache_;
     int top_ = 0;
+    // A network was loaded at the last reset: stack_ is then left as it was.
+    bool network_ = false;
 };

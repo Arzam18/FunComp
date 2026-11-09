@@ -370,7 +370,7 @@ void Position::apply_move(Move move, StateInfo& st) {
     st.pawn_key = pawn_key_;
     st.nonpawn_key[0] = nonpawn_key_[0];
     st.nonpawn_key[1] = nonpawn_key_[1];
-    st.dirty.count = 0;
+    st.changes.count = 0;
     st.castling = castling_;
     st.ep_square = ep_square_;
     st.halfmove_clock = halfmove_clock_;
@@ -382,8 +382,8 @@ void Position::apply_move(Move move, StateInfo& st) {
     const Color us = side_;
     const Color them = opposite(us);
 
-    auto dirty = [&st](Piece p, int f, int t) {
-        DirtyPiece& d = st.dirty.d[st.dirty.count++];
+    auto change = [&st](Piece p, int f, int t) {
+        PieceChange& d = st.changes.list[st.changes.count++];
         d.piece = p;
         d.from = static_cast<std::int8_t>(f);
         d.to = static_cast<std::int8_t>(t);
@@ -398,23 +398,23 @@ void Position::apply_move(Move move, StateInfo& st) {
     if (move.is_en_passant()) {
         const int cap_sq = to + (us == Color::White ? -8 : 8);
         st.captured = board_[cap_sq];
-        dirty(st.captured, cap_sq, -1);
+        change(st.captured, cap_sq, -1);
         remove_piece(cap_sq);
     } else {
         st.captured = board_[to];
         if (st.captured != NO_PIECE) {
-            dirty(st.captured, to, -1);
+            change(st.captured, to, -1);
             remove_piece(to);
         }
     }
 
-    const int moving_index = st.dirty.count;
-    dirty(moving, from, to);
+    const int moving_index = st.changes.count;
+    change(moving, from, to);
     move_piece(from, to);
 
     // Castling rook movement.
     auto castle_rook = [&](int rfrom, int rto) {
-        dirty(board_[rfrom], rfrom, rto);
+        change(board_[rfrom], rfrom, rto);
         move_piece(rfrom, rto);
     };
     if (moving == WK && from == sq(4,0)) {
@@ -429,8 +429,8 @@ void Position::apply_move(Move move, StateInfo& st) {
     const PieceType promo = move.promotion();
     if (promo != PieceType::None) {
         const Piece promoted = static_cast<Piece>(piece_index(us, promo));
-        st.dirty.d[moving_index].to = -1;  // the pawn leaves the board...
-        dirty(promoted, -1, to);           // ...and the new piece appears
+        st.changes.list[moving_index].to = -1;  // the pawn leaves the board...
+        change(promoted, -1, to);                // ...and the new piece appears
         remove_piece(to);
         put_piece(promoted, to);
     }
@@ -653,7 +653,7 @@ void Position::make_null_move(StateInfo& st) {
     st.pawn_key = pawn_key_;
     st.nonpawn_key[0] = nonpawn_key_[0];
     st.nonpawn_key[1] = nonpawn_key_[1];
-    st.dirty.count = 0;
+    st.changes.count = 0;
     st.castling = castling_;
     st.ep_square = ep_square_;
     st.halfmove_clock = halfmove_clock_;

@@ -7,6 +7,8 @@ description = "Trains FunComp's networks with bullet (MIT, github.com/jw1912/bul
 
 [dependencies]
 bullet_lib = { git = "https://github.com/jw1912/bullet", package = "bullet_lib", features = ["cuda"] }
+# The loader trait (DataReader) for the streaming shuffle, stream.rs: not re-exported by bullet_lib.
+bullet_trainer = { git = "https://github.com/jw1912/bullet", package = "bullet-trainer" }
 
 [profile.release]
 debug = false

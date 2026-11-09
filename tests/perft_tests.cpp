@@ -125,7 +125,7 @@ bool walk_consistent(Position& p, Evaluator& ev, int depth) {
                       << p.fen() << '\n';
             return false;
         }
-        ev.push(st.dirty);
+        ev.push(st.changes);
         const bool ok = walk_consistent(p, ev, depth - 1);
         ev.pop();
         p.unmake_move(moves[i], st);

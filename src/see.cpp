@@ -23,16 +23,18 @@ int see(const Position& pos, Move m) {
     // Every pawn capture onto the first or last rank promotes (to a queen,
     // for the recaptures); the promoting side gains the difference.
     const bool promo_square = params::see_promo && (rank_of(to) == 0 || rank_of(to) == 7);
-    constexpr int QUEEN_GAIN = SEE_VALUE[4] - SEE_VALUE[0];
+    // The search's values (params.h); the pawn is never tuned, so its
+    // constant serves where only the pawn can stand.
+    const auto& value = params::see_piece_value;
 
     // gain[d]: material for the side making capture d (the move itself is
     // capture 0), if the exchange stops right after it.
     int gain[32];
     int d = 0;
-    gain[0] = victim == NO_PIECE ? 0 : SEE_VALUE[type_of(victim)];
-    int on_square = SEE_VALUE[type_of(pos.piece_at(m.from()))];  // piece now standing on `to`
+    gain[0] = victim == NO_PIECE ? 0 : value[type_of(victim)];
+    int on_square = value[type_of(pos.piece_at(m.from()))];  // piece now standing on `to`
     if (m.promotion() != PieceType::None) {
-        const int promoted = SEE_VALUE[static_cast<int>(m.promotion())];
+        const int promoted = value[static_cast<int>(m.promotion())];
         gain[0] += promoted - SEE_VALUE[0];
         on_square = promoted;
     }
@@ -75,10 +77,10 @@ int see(const Position& pos, Move m) {
 
         ++d;
         gain[d] = on_square - gain[d - 1];
-        on_square = SEE_VALUE[pt];
+        on_square = value[pt];
         if (pt == 0 && promo_square) {
-            gain[d] += QUEEN_GAIN;
-            on_square = SEE_VALUE[4];
+            gain[d] += value[4] - SEE_VALUE[0];
+            on_square = value[4];
         }
         side = opposite(side);
     }
@@ -102,16 +104,17 @@ bool see_at_least(const Position& pos, Move m, int threshold) {
     // promotion's worth more on our own back rank, where the other side's
     // first recapture can be a pawn promoting. Most calls are settled by
     // these bounds.
+    const auto& value = params::see_piece_value;
     const Piece victim = pos.piece_at(m.to());
-    int most = victim == NO_PIECE ? 0 : SEE_VALUE[type_of(victim)];
-    int on_square = SEE_VALUE[type_of(pos.piece_at(m.from()))];
+    int most = victim == NO_PIECE ? 0 : value[type_of(victim)];
+    int on_square = value[type_of(pos.piece_at(m.from()))];
     if (promo != PieceType::None) {
-        most += SEE_VALUE[static_cast<int>(promo)] - SEE_VALUE[0];
-        on_square = SEE_VALUE[static_cast<int>(promo)];
+        most += value[static_cast<int>(promo)] - SEE_VALUE[0];
+        on_square = value[static_cast<int>(promo)];
     }
     const int own_back_rank = pos.side_to_move() == Color::White ? 0 : 7;
     const bool enemy_promotes = params::see_promo && rank_of(m.to()) == own_back_rank;
-    const int least = most - on_square - (enemy_promotes ? SEE_VALUE[4] - SEE_VALUE[0] : 0);
+    const int least = most - on_square - (enemy_promotes ? value[4] - SEE_VALUE[0] : 0);
     if (most < threshold) return false;
     if (least >= threshold) return true;
     return see(pos, m) >= threshold;

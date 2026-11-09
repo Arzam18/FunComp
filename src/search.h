@@ -28,6 +28,10 @@ struct SearchLimits {
     // best move that keeps changing or a falling score earns more, one that
     // holds or took most of the nodes less; the author, 2026-10-07, datagen).
     bool soft_scale = false;
+    // A floor under the soft node limit (the author, 2026-10-25, datagen: no
+    // shallow labels by accident): no soft node stop until this depth has
+    // completed; `nodes` still cuts it short. 0 = none.
+    int min_depth = 0;
     // "go searchmoves": only these root moves (legal ones; with a tablebase
     // ranking, those of them it keeps, or its own if none). Empty: all.
     std::vector<Move> search_moves;
@@ -155,6 +159,7 @@ private:
 };
 
 class ContLog;  // cont_log.h
+class TreeSampler;  // tree_sample.h
 // Continuation logging is compiled in only with -DCONT_LOG=ON (CMake).
 #ifdef CONT_LOG
 inline constexpr bool CONT_LOG_BUILD = true;
@@ -307,11 +312,15 @@ public:
     // applied) and the correction in it; NO_EVAL for both in check.
     // quiescence: a full-window quiescence search of `pos` (`history` as for
     // search()), on the current hash table and histories; it resets nodes().
+    // With `plain`, the hash neither cuts nor sharpens a stand-pat (the
+    // corrected static eval as it is): what the captures alone make of the
+    // position, the quiet test of datatext qsquiet=. Without it, after a
+    // search of `pos` the stand-pat takes that search's score.
     struct RootEval {
         int static_eval, correction;
     };
     RootEval root_eval(const Position& pos);
-    int quiescence(Position& pos, const std::vector<std::uint64_t>& history);
+    int quiescence(Position& pos, const std::vector<std::uint64_t>& history, bool plain = false);
     // For tests: nodes spent under root move `m` in the last search, over
     // all its iterations, and under all root moves together.
     std::uint64_t root_move_nodes(Move m) const {
@@ -345,6 +354,9 @@ public:
     // Continuation logging (cont_log.h): sampled nodes record their moves
     // and outcomes in `log`; null turns it off.
     void set_cont_log(ContLog* log) { cont_log_ = log; }
+    // Tree sampling (tree_sample.h): positions where the search reads its static evaluation, written by
+    // `sampler`; null turns it off. Research builds only (CONT_LOG), as the continuation log.
+    void set_tree_sample(TreeSampler* sampler) { tree_sample_ = sampler; }
 
 private:
     using Clock = std::chrono::steady_clock;
@@ -615,5 +627,7 @@ private:
     // left behind and freed when an ancestor closes or the search ends: no
     // cleanup on every exit of negamax.
     ContLog* cont_log_ = nullptr;
+    bool qs_plain_ = false;  // quiescence(..., plain): no hash cutoffs or sharpened stand-pats
+    TreeSampler* tree_sample_ = nullptr;
     std::vector<ContNode*> cont_open_;
 };

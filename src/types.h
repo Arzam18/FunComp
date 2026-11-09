@@ -83,7 +83,7 @@ struct Move {
 // One piece-square change made by a move, for incremental evaluation.
 // from < 0: the piece appeared on `to` (promotion). to < 0: the piece left
 // the board from `from` (capture, or the pawn that promoted).
-struct DirtyPiece {
+struct PieceChange {
     Piece piece;
     std::int8_t from;
     std::int8_t to;
@@ -91,9 +91,9 @@ struct DirtyPiece {
 
 // Every piece-square change made by one move: at most three (a capturing
 // promotion removes the victim and the pawn and adds the new piece).
-struct DirtyPieces {
+struct MoveChanges {
     int count = 0;
-    DirtyPiece d[3];
+    PieceChange list[3];
 };
 
 struct StateInfo {
@@ -105,7 +105,7 @@ struct StateInfo {
     int halfmove_clock = 0;
     Piece captured = NO_PIECE;
     Bitboard checkers = 0;  // Position::checkers() before the move
-    DirtyPieces dirty;  // filled in by make_move
+    MoveChanges changes;  // filled in by make_move
 };
 
 using MoveList = std::array<Move, 256>;

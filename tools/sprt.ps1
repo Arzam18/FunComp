@@ -17,7 +17,8 @@ can be set this way, so one build can be played against itself with a
 heuristic switched off or a margin changed. fastchess only sends options
 the engine advertises (it skips the rest with a warning), so such runs
 need a build configured with -DTUNE=ON. The script checks this and
-refuses to start otherwise.
+refuses to start otherwise. (A build without TUNE has the parameters as
+constants, FROZEN_PARAMS: told to change one, it stops with an error.)
 
 .EXAMPLE
 # Is the new build better than the pre-pruning engine?

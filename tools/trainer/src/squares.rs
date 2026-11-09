@@ -1,17 +1,17 @@
-// Threats and square control, the trainer's side of src/square_features.h:
-// the same definitions and numbering, on bullet's boards (seen from the
-// side to move: its pawns attack up the board). Each function returns
-// (stm, ntm) offsets into its family's block, or nothing past the family's
-// bound (the engine's all-or-nothing rule).
+// Square control, the trainer's side of src/square_features.h: the same
+// definitions and numbering, on bullet's boards (seen from the side to move:
+// its pawns attack up the board). Each function returns (stm, ntm) offsets
+// into its family's block, or nothing past the family's bound (the engine's
+// all-or-nothing rule). The threat family T (bit 4) is retired (the
+// originality audit, R2): its definition and indexing were Stockfish 19's
+// threat inputs. Threat knowledge by chess logic is family W, on its own
+// branch (family-w).
 
 use bullet_lib::game::formats::bulletformat::ChessBoard;
 
-pub const THREAT_SLOTS: usize = 7532;
-pub const THREAT_FEATURES: usize = 12 * THREAT_SLOTS;
 pub const ATTACKED_FEATURES: usize = 128;
 pub const LEAST_ATTACKER_FEATURES: usize = 768;
 pub const KING_ZONE_FEATURES: usize = 128;
-pub const THREAT_MAX: usize = 256;
 pub const SQUARE_MAX: usize = 128;
 
 const DIAG: [(i32, i32); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
@@ -60,30 +60,6 @@ fn attacks(colour: usize, piece_type: usize, sq: usize, occ: u64) -> u64 {
     }
 }
 
-struct Slots {
-    slot: [[[usize; 64]; 6]; 2],
-    reach: [[[u64; 64]; 6]; 2],
-}
-
-fn slots() -> &'static Slots {
-    static TABLE: std::sync::OnceLock<Slots> = std::sync::OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut t = Slots { slot: [[[0; 64]; 6]; 2], reach: [[[0; 64]; 6]; 2] };
-        let mut n = 0;
-        for c in 0..2 {
-            for pt in 0..6 {
-                for s in 0..64 {
-                    t.slot[c][pt][s] = n;
-                    t.reach[c][pt][s] = attacks(c, pt, s, 0);
-                    n += t.reach[c][pt][s].count_ones() as usize;
-                }
-            }
-        }
-        assert_eq!(n, THREAT_SLOTS);
-        t
-    })
-}
-
 /// The board as (square, colour (0 the side to move), type) and occupancy.
 fn pieces(pos: &ChessBoard) -> (Vec<(usize, usize, usize)>, [Option<(usize, usize)>; 64], u64) {
     let mut list = Vec::new();
@@ -106,28 +82,6 @@ fn view_sq(view: usize, flip: usize, sq: usize) -> usize {
 
 fn bounded(out: Vec<(usize, usize)>, bound: usize) -> Vec<(usize, usize)> {
     if out.len() > bound { Vec::new() } else { out }
-}
-
-pub fn threats(pos: &ChessBoard, flips: [usize; 2]) -> Vec<(usize, usize)> {
-    let t = slots();
-    let (list, at, occ) = pieces(pos);
-    let mut out = Vec::new();
-    for &(a, c, pt) in &list {
-        let mut m = attacks(c, pt, a, occ) & occ;
-        while m != 0 {
-            let v = m.trailing_zeros() as usize;
-            m &= m - 1;
-            let (vc, vt) = at[v].unwrap();
-            let one = |view: usize| {
-                let (sa, sv) = (view_sq(view, flips[view], a), view_sq(view, flips[view], v));
-                let rc = c ^ view;
-                let place = (t.reach[rc][pt][sa] & ((1u64 << sv) - 1)).count_ones() as usize;
-                (t.slot[rc][pt][sa] + place) * 12 + (vc ^ view) * 6 + vt
-            };
-            out.push((one(0), one(1)));
-        }
-    }
-    bounded(out, THREAT_MAX)
 }
 
 /// Each side's attacks by piece type (colour 0 the side to move).
